@@ -34,7 +34,9 @@ library(cowplot)
 ## Define functions to calculate correlations and PCA table
 
 ```{r}
-# Define functions ----------------
+#### PCA table function #####
+#### Input: data frame for table, column index, PCA summaries for both hemispheres
+#### Output: ggplot object
 pca.table <- function(table.tmp, ind, a, b) {
   tmp.a <- summary(a)
   tmp.b <- summary(b)
@@ -42,12 +44,31 @@ pca.table <- function(table.tmp, ind, a, b) {
   return(table.tmp)
 }
 
+#### Function to calculate lambda for LASSO regression #####
+#### Input: summary from cross-validation procedure, tolerance value
+#### Output: optimized lambda
+
 get_lambda <- function(fit, tol = .5) {
   error <- fit$cvm[fit$lambda == fit$lambda.min]
   sd <- fit$cvsd[fit$lambda == fit$lambda.min]
   tolerance <- error + tol*sd
   max(fit$lambda[fit$cvm < tolerance])
 }
+
+#### Function to compute LASSO coefficients #####
+#### Input: input data, subject subset (determined by bootstrapping function)
+#### Output: coefficients
+
+lasso.coef <- function(data, indices) {
+  d <- data[indices,]
+  fit <- glmnet(x = d[,c(3:ncol(d))], y = d[,c(1,2)], 
+                    alpha = 1, family = "cox", lambda = get_lambda(lasso.fit.cv, 0.25), standardize = TRUE)
+  return(coef(fit)[,1])
+}
+
+#### PCA variance plot function #####
+#### Input: PCA results, title
+#### Output: ggplot object
 
 pca_plot <- function(plot.data, title){
   
@@ -72,6 +93,9 @@ pca_plot <- function(plot.data, title){
   return(tmp.plot)
 }
 
+#### PCA loading plot function #####
+#### Input: loading values for domain in each hemisphere, title
+#### Output: ggplot object
 
 loading_plot <- function(domain.data.lh, domain.data.rh, title){
 
@@ -122,47 +146,103 @@ loading_plot <- function(domain.data.lh, domain.data.rh, title){
   return(plot.loading)
 }
 
-cox_model <- function(S, time.to.pace, gaf, pre.cond, i, cox.table, overfit.table, ...){
-  x <- list(...)
-  if (length(x) > 0){
-    pc.l <- x[[1]]
-    pc.r <- x[[2]]
-    bl <- cph(S ~ time.to.pace + gaf + pre.cond + pc.l + pc.r, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
-  }else{
-    dd <- datadist(time.to.pace, gaf, pre.cond)
-    options(datadist="dd")
-    bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
-  }
+#### Cox model function #####
+#### Input: predictors for Cox model, row index for table, tables, additional predictors (optional)
+#### Output: summary and overfitting table
+
+cox_model <- function(cox.bl, i, cox.table, overfit.table, ...){
+
+  x = list(...)
   # Get bootstrapped model
-  bl.conf <- bootcov(bl, B=1000, pr=TRUE)
+  bl.conf <- bootcov(cox.bl, B=1000, pr=TRUE)
   # Extract regression parameters for each predictor
   bl.an <- anova(bl.conf)
   # Store regression summary
-  dd <- datadist(time.to.pace, gaf, pre.cond, pc.l, pc.r)
-  options(datadist="dd")
   bl.summ <- summary(bl.conf, pre.cond = 3)
   # Internal validation using bootstrapping
-  bl.val <- validate(bl, method="boot", B=1000, bw=FALSE)
+  bl.val <- validate(cox.bl, method="boot", B=1000, bw=FALSE)
   # Store overfitting values
   overfit.table[i,] <- c(bl.val['Dxy', 'optimism'], bl.val['R2','optimism'], bl.val['Slope','optimism'])
   
   if (length(x) > 0){
-    bl.p <- lrtest(x[[3]], bl.conf)
+    bl.p <- lrtest(x[[1]], bl.conf)
   
-    cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[10,4], bl.an[3,3],bl.summ[12,4], bl.an[3,3], bl.summ[6,4], bl.an[4,3], bl.summ[8,4], bl.an[5,3], bl$stats['Model L.R.'], bl.p$stats['P'], 1-(x[[4]]/bl$stats['Model L.R.']), bl.val['Dxy', 'index.corrected']/2 + 0.5)
+    cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[10,4], bl.an[3,3],bl.summ[12,4], bl.an[3,3], bl.summ[6,4], bl.an[4,3], bl.summ[8,4], bl.an[5,3], cox.bl$stats['Model L.R.'], bl.p$stats['P'], 1-(x[[2]]/cox.bl$stats['Model L.R.']), bl.val['Dxy', 'index.corrected']/2 + 0.5)
     
     return(list(cox.table, overfit.table))
   }else{
-
-    # Assign likelihood ratio test
-    LR.orig <- bl$stats['Model L.R.']
     # Store regression results
     cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[6,4], bl.an[3,3], bl.summ[8,4], bl.an[3,3], 0, 0, 0, 0, LR.orig, 0, 1, bl.val['Dxy',   'index.corrected']/2 + 0.5)
-    return(list(cox.table, overfit.table, bl.conf, LR.orig))
+    return(list(cox.table, overfit.table))
   }
   
 }
 
+#### Calibration plot function #####
+#### Input: predictors for Cox model, timepoint
+#### Output: ggplot object
+
+calibration_plot <- function(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, pre.cond, pc1.thick, pc2.thick, t){
+  
+  set.seed(123)
+
+  dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, pre.cond, pc1.thick, pc2.thick)
+  options(datadist='dd')
+  
+  bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = t*12)
+  bl.caarms <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = t*12)
+  bl.thick <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.thick + pc2.thick,  x=TRUE, y=TRUE, surv=TRUE, time.inc = t*12)
+  
+  bl.cal <- calibrate(bl.thick, method = "boot", u= 2*12, m=10, B=1000, bw=FALSE)
+  bl.caarms.cal <- calibrate(bl.caarms, method = "boot", u= 2*12, m=10, B=1000, bw=FALSE)
+  bl.base.cal <- calibrate(bl, method = "boot", u= 2*12, m=10, B=1000, bw=FALSE)
+  
+  
+  pred <- as.data.frame(1 - bl.cal[,'pred'])
+  colnames(pred) <- c('x')
+  
+  cal.correct <- as.data.frame(1 - bl.cal[,'calibrated.corrected'])
+  colnames(cal.correct) <- c('Value')
+  cal.correct$Type <- 'MRI'
+  
+  cal.base.correct <- as.data.frame(1 - bl.base.cal[,'calibrated.corrected'])
+  colnames(cal.base.correct) <- c('Value')
+  cal.base.correct$Type <- 'clinical'
+  
+  cal <- as.data.frame(bl.base.cal[,'calibrated'])
+  colnames(cal) <- c('Value')
+  cal$Type <- 'observed'
+  
+  cal.caarms.correct <- as.data.frame(1 - bl.caarms.cal[,'calibrated.corrected'])
+  colnames(cal.caarms.correct) <- c('Value')
+  cal.caarms.correct$Type <- 'CAARMS'
+  
+  cal_plot_data <- rbind(cbind(pred,cal.correct), cbind(pred, cal.base.correct), cbind(pred, cal.caarms.correct))
+  
+  
+  cal.plot <- ggplot(cal_plot_data, aes(x = x, y = Value, group = Type)) + 
+         geom_line(aes(color = Type), size = 1.1) +
+         scale_x_continuous(name =paste("Predicted ", as.character(t),"-year Probability of Transition to Psychosis",sep = ""), breaks = c(0.2,0.4,0.6,0.8), limits=c(0.15, 0.9)) +
+         scale_y_continuous(name=paste("Observed ", as.character(t),"-year Probability of Transition to Psychosis",sep = ""), breaks = c(0.2,0.4,0.6,0.8), limits=c(0.15, 0.9)) +
+         theme_bw() +
+         labs(color = '') +
+         geom_abline(aes(intercept = 0, slope = 1, color='black'))	+
+          scale_color_manual(values = c("black" = "black", "clinical" = "#310374", "MRI" = "#d81a56", "CAARMS" = "#ffb42d"),
+                             labels = c("ideal",  "base", "base + MRI", "base + CAARMS subscales"),
+                                     guide = guide_legend(override.aes = list(pch = c(16, NA, NA, NA), linetype = c(1, 1, 1, 1)))) +
+         theme(plot.title = element_text(size = 18, hjust = 0.5),
+               axis.title.x = element_text(size = 16),
+               axis.title.y = element_text(size = 16),
+               legend.text = element_text(size = 14),
+               legend.title = element_text(size = 16),
+               axis.text.x = element_text(size = 14),
+               axis.text.y = element_text(size = 14)) +
+         theme(legend.position="bottom")
+  
+  return(cal.plot)
+  
+  
+}
 ```
 
 ## Load data
@@ -462,13 +542,13 @@ units(dtime) <- 'Month'
 # Define Surv model
 S <- Surv(dtime, event)
 
-set.seed(12)
+
 ```
 
 Cox model using clinical variables
 
 ```{r, echo=FALSE}
-
+set.seed(12)
 # Create empty data frames for regression results table
 cox.table <- data.frame(hr1=double(),
                   p1=double(),
@@ -492,19 +572,32 @@ overfit.table <- data.frame(delta_Dxy=double(),
                  delta_R2=double(), 
                  delta_slope=double())
 
-a <- cox_model(S, time.to.pace, gaf, pre.cond, 1, cox.table, overfit.table)
-bl.conf <- a[[3]]
-LR.orig <- a[[4]]
+cox.bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+# Get bootstrapped model
+bl.conf <- bootcov(cox.bl, B=1000, pr=TRUE)
+LR.orig <- cox.bl$stats['Model L.R.']
+cox.res <- cox_model(cox.bl, 1, cox.table, overfit.table)
 
-a <- cox_model(S, time.to.pace, gaf, pre.cond, 2, a[[1]], a[[2]], caarms.tc, caarms.cd, bl.conf, LR.orig)
-a <- cox_model(S, time.to.pace, gaf, pre.cond, 3, a[[1]], a[[2]], pc1.surf, pc2.surf, bl.conf, LR.orig)
-a <- cox_model(S, time.to.pace, gaf, pre.cond, 4, a[[1]], a[[2]], pc1.vol, pc2.vol, bl.conf, LR.orig)
-a <- cox_model(S, time.to.pace, gaf, pre.cond, 5, a[[1]], a[[2]], pc1.curve, pc2.curve, bl.conf, LR.orig)
-a <- cox_model(S, time.to.pace, gaf, pre.cond, 6, a[[1]], a[[2]], pc1.thick, pc2.thick, bl.conf, LR.orig)
-a <- cox_model(S, time.to.pace, gaf, pre.cond, 7, a[[1]], a[[2]], brain_age, age, bl.conf, LR.orig)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 2, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-cox.table <- a[[1]]
-overfit.table <- a[[2]]
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.surf + pc2.surf, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 3, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.curve + pc2.curve, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 4, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.vol + pc2.vol, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 5, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.thick + pc2.thick, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 6, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + brain_age + age, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 7, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+cox.table <- cox.res[[1]]
+overfit.table <- cox.res[[2]]
 
 ```
 
@@ -566,184 +659,51 @@ for (mt in c(24,60,120)){
 ## Calibration
 
 ```{r, echo=FALSE,  fig.height = 7, fig.width = 7, fig.align = "center"}
-set.seed(123)
 
-dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, pre.cond, pc1.thick, pc2.thick)
-options(datadist='dd')
+year2_plot <- calibration_plot(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, pre.cond, pc1.thick, pc2.thick, 2)
+year5_plot <- calibration_plot(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, pre.cond, pc1.thick, pc2.thick, 5)
+year10_plot <- calibration_plot(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, pre.cond, pc1.thick, pc2.thick, 10)
 
-bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 2*12)
-bl.caarms <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 2*12)
-bl.thick <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.thick + pc2.thick,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 2*12)
-
-bl.cal <- calibrate(bl.thick, method = "boot", u= 2*12, m=10, B=1000, bw=FALSE)
-bl.caarms.cal <- calibrate(bl.caarms, method = "boot", u= 2*12, m=10, B=1000, bw=FALSE)
-bl.base.cal <- calibrate(bl, method = "boot", u= 2*12, m=10, B=1000, bw=FALSE)
-
-
-pred <- as.data.frame(1 - bl.cal[,'pred'])
-colnames(pred) <- c('x')
-
-cal.correct <- as.data.frame(1 - bl.cal[,'calibrated.corrected'])
-colnames(cal.correct) <- c('Value')
-cal.correct$Type <- 'MRI'
-
-cal.base.correct <- as.data.frame(1 - bl.base.cal[,'calibrated.corrected'])
-colnames(cal.base.correct) <- c('Value')
-cal.base.correct$Type <- 'clinical'
-
-cal <- as.data.frame(bl.base.cal[,'calibrated'])
-colnames(cal) <- c('Value')
-cal$Type <- 'observed'
-
-cal.caarms.correct <- as.data.frame(1 - bl.caarms.cal[,'calibrated.corrected'])
-colnames(cal.caarms.correct) <- c('Value')
-cal.caarms.correct$Type <- 'CAARMS'
-
-cal_plot_data <- rbind(cbind(pred,cal.correct), cbind(pred, cal.base.correct), cbind(pred, cal.caarms.correct))
-
-
-ggplot(cal_plot_data, aes(x = x, y = Value, group = Type)) + 
-       geom_line(aes(color = Type), size = 1.1) +
-       scale_x_continuous(name ="Predicted 2-year Probability of Psychosis", breaks = c(0.2,0.4,0.6,0.8), limits=c(0.15, 0.9)) +
-       scale_y_continuous(name="Observed 2-year Probability of Psychosis", breaks = c(0.2,0.4,0.6,0.8), limits=c(0.15, 0.9)) +
-       theme_bw() +
-       labs(color = '') +
-       geom_abline(aes(intercept = 0, slope = 1, color='black'))	+
-        scale_color_manual(values = c("black" = "black", "clinical" = "#310374", "MRI" = "#d81a56", "CAARMS" = "#ffb42d"),
-                           labels = c("ideal",  "base", "base + MRI", "base + CAARMS subscales"),
-                                   guide = guide_legend(override.aes = list(pch = c(16, NA, NA, NA), linetype = c(1, 1, 1, 1)))) +
-       theme(plot.title = element_text(size = 18, hjust = 0.5),
-             axis.title.x = element_text(size = 16),
-             axis.title.y = element_text(size = 16),
-             legend.text = element_text(size = 14),
-             legend.title = element_text(size = 16),
-             axis.text.x = element_text(size = 14),
-             axis.text.y = element_text(size = 14)) +
-       theme(legend.position="bottom")
+year2_plot
+year5_plot
+year10_plot
 
 ```
-
-```{r, echo=FALSE,  fig.height = 7, fig.width = 7, fig.align = "center"}
-set.seed(123)
-
-dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, pre.cond, pc1.thick, pc2.thick)
-options(datadist='dd')
-
-bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 5*12)
-bl.caarms <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 5*12)
-bl.thick <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.thick + pc2.thick,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 5*12)
-
-bl.cal <- calibrate(bl.thick, method = "boot", u= 5*12, m=10,B=1000, bw=FALSE)
-bl.caarms.cal <- calibrate(bl.caarms, method = "boot", u= 5*12, m=10,B=1000, bw=FALSE)
-bl.base.cal <- calibrate(bl, method = "boot", u= 5*12, m=10,B=1000, bw=FALSE)
-
-
-pred <- as.data.frame(1 - bl.cal[,'pred'])
-colnames(pred) <- c('x')
-
-cal.correct <- as.data.frame(1 - bl.cal[,'calibrated.corrected'])
-colnames(cal.correct) <- c('Value')
-cal.correct$Type <- 'MRI'
-
-cal.base.correct <- as.data.frame(1 - bl.base.cal[,'calibrated.corrected'])
-colnames(cal.base.correct) <- c('Value')
-cal.base.correct$Type <- 'clinical'
-
-cal <- as.data.frame(bl.base.cal[,'calibrated'])
-colnames(cal) <- c('Value')
-cal$Type <- 'observed'
-
-cal.caarms.correct <- as.data.frame(1 - bl.caarms.cal[,'calibrated.corrected'])
-colnames(cal.caarms.correct) <- c('Value')
-cal.caarms.correct$Type <- 'CAARMS'
-
-cal_plot_data <- rbind(cbind(pred,cal.correct), cbind(pred, cal.base.correct), cbind(pred, cal.caarms.correct))
-
-
-ggplot(cal_plot_data, aes(x = x, y = Value, group = Type)) + 
-       geom_line(aes(color = Type), size = 1.1) +
-       scale_x_continuous(name ="Predicted 5-year Probability of Psychosis", breaks = c(0.2,0.4,0.6,0.8), limits=c(0.15, 0.9)) +
-       scale_y_continuous(name="Observed 5-year Probability of Psychosis", breaks = c(0.2,0.4,0.6,0.8), limits=c(0.15, 0.9)) +
-       theme_bw() +
-       labs(color = '') +
-       geom_abline(aes(intercept = 0, slope = 1, color='black'))	+
-        scale_color_manual(values = c("black" = "black", "clinical" = "#310374", "MRI" = "#d81a56", "CAARMS" = "#ffb42d"),
-                           labels = c("ideal",  "base", "base + MRI", "base + CAARMS subscales"),
-                                   guide = guide_legend(override.aes = list(pch = c(16, NA, NA, NA), linetype = c(1, 1, 1, 1)))) +
-       theme(plot.title = element_text(size = 18, hjust = 0.5),
-             axis.title.x = element_text(size = 16),
-             axis.title.y = element_text(size = 16),
-             legend.text = element_text(size = 14),
-             legend.title = element_text(size = 16),
-             axis.text.x = element_text(size = 14),
-             axis.text.y = element_text(size = 14)) +
-       theme(legend.position="bottom")
-
-```
-
-
-```{r, echo=FALSE,  fig.height = 7, fig.width = 7, fig.align = "center"}
-set.seed(123)
-
-dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, pre.cond, pc1.thick, pc2.thick)
-options(datadist='dd')
-
-bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
-bl.caarms <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
-bl.thick <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.thick + pc2.thick,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 10*12)
-
-bl.cal <- calibrate(bl.thick, method = "boot", u= 10*12, m=10,B=1000, bw=FALSE)
-bl.caarms.cal <- calibrate(bl.caarms, method = "boot", u= 10*12, m=10,B=1000, bw=FALSE)
-bl.base.cal <- calibrate(bl, method = "boot", u= 10*12, m=10,B=1000, bw=FALSE)
-
-
-pred <- as.data.frame(1 - bl.cal[,'pred'])
-colnames(pred) <- c('x')
-
-cal.correct <- as.data.frame(1 - bl.cal[,'calibrated.corrected'])
-colnames(cal.correct) <- c('Value')
-cal.correct$Type <- 'MRI'
-
-cal.base.correct <- as.data.frame(1 - bl.base.cal[,'calibrated.corrected'])
-colnames(cal.base.correct) <- c('Value')
-cal.base.correct$Type <- 'clinical'
-
-cal <- as.data.frame(bl.base.cal[,'calibrated'])
-colnames(cal) <- c('Value')
-cal$Type <- 'observed'
-
-cal.caarms.correct <- as.data.frame(1 - bl.caarms.cal[,'calibrated.corrected'])
-colnames(cal.caarms.correct) <- c('Value')
-cal.caarms.correct$Type <- 'CAARMS'
-
-cal_plot_data <- rbind(cbind(pred,cal.correct), cbind(pred, cal.base.correct), cbind(pred, cal.caarms.correct))
-
-
-ggplot(cal_plot_data, aes(x = x, y = Value, group = Type)) + 
-       geom_line(aes(color = Type), size = 1.1) +
-       scale_x_continuous(name ="Predicted 10-year Probability of Psychosis", breaks = c(0.2,0.4,0.6,0.8), limits=c(0.15, 0.9)) +
-       scale_y_continuous(name="Observed 10-year Probability of Psychosis", breaks = c(0.2,0.4,0.6,0.8), limits=c(0.15, 0.9)) +
-       theme_bw() +
-       labs(color = '') +
-       geom_abline(aes(intercept = 0, slope = 1, color='black'))	+
-        scale_color_manual(values = c("black" = "black", "clinical" = "#310374", "MRI" = "#d81a56", "CAARMS" = "#ffb42d"),
-                           labels = c("ideal",  "base", "base + MRI", "base + CAARMS subscales"),
-                                   guide = guide_legend(override.aes = list(pch = c(16, NA, NA, NA), linetype = c(1, 1, 1, 1)))) +
-       theme(plot.title = element_text(size = 18, hjust = 0.5),
-             axis.title.x = element_text(size = 16),
-             axis.title.y = element_text(size = 16),
-             legend.text = element_text(size = 14),
-             legend.title = element_text(size = 16),
-             axis.text.x = element_text(size = 14),
-             axis.text.y = element_text(size = 14)) +
-       theme(legend.position="bottom")
-
-```
-
 
 Cox Model using clinical variables and neurocognition variables
 
 ```{r, echo=FALSE}
+
+dtime <- PACE_neurocog$transmonths
+event <- PACE_neurocog$transtat
+
+rm(time.to.pace, gaf, ttmt, pre.cond, caarms.tc, caarms.cd)
+
+# Preperation for imputation
+w <- transcan(~ timepace + gaf +  ttmt + pre.cond + tc + cd + Ax1CodingASS + Ax1ArithASS, imputed=TRUE, data = PACE_neurocog, pl=FALSE, pr = FALSE)
+
+# create variables out of columns
+attach(PACE_neurocog)
+
+# Imputation
+time.to.pace <- log(impute(w, timepace, data = PACE_neurocog))
+gaf <- impute(w, gaf, data = PACE_neurocog)
+ttmt <- impute(w, ttmt, data = PACE_neurocog)
+pre.cond <- impute(w, pre.cond, data = PACE_neurocog)
+cog1 <- impute(w, Ax1CodingASS, data = PACE_neurocog)
+cog2 <- impute(w, Ax1ArithASS, data = PACE_neurocog)
+caarms.tc <- impute(w, tc, data = PACE_neurocog)
+caarms.cd <- impute(w, cd, data = PACE_neurocog)
+
+pre.cond <- relevel(factor(pre.cond),ref=3)
+# Preperation for cox model fit
+dd <- datadist(time.to.pace, gaf, ttmt, pre.cond, cog1, cog2, caarms.cd, caarms.tc)
+options(datadist='dd')
+units(dtime) <- 'Month'
+
+# Define Surv model
+S <- Surv(dtime, event)
+
 
 # Create empty data frames for regression results table
 cox.table <- data.frame(hr1=double(),
@@ -768,84 +728,22 @@ overfit.table <- data.frame(delta_Dxy=double(),
                  delta_R2=double(), 
                  delta_slope=double())
 
-dtime <- PACE_neurocog$transmonths
-event <- PACE_neurocog$transtat
+set.seed(12)
 
-rm(time.to.pace, gaf, ttmt, pre.cond, caarms.tc, caarms.cd)
-
-# Preperation for imputation
-w <- transcan(~ timepace + gaf +  ttmt + pre.cond + tc + cd + Ax1CodingASS + Ax1ArithASS, imputed=TRUE, data = PACE_neurocog, pl=FALSE, pr = FALSE)
-
-# create variables out of columns
-attach(PACE_neurocog)
-
-# Imputation
-time.to.pace <- log(impute(w, timepace, data = PACE_neurocog))
-gaf <- impute(w, gaf, data = PACE_neurocog)
-ttmt <- impute(w, ttmt, data = PACE_neurocog)
-pre.cond <- impute(w, pre.cond, data = PACE_neurocog)
-kauf.iq <- impute(w, Ax1CodingASS, data = PACE_neurocog)
-wards.iq <- impute(w, Ax1ArithASS, data = PACE_neurocog)
-caarms.tc <- impute(w, tc, data = PACE_MRI)
-caarms.cd <- impute(w, cd, data = PACE_MRI)
-
-pre.cond <- relevel(factor(pre.cond),ref=3)
-# Preperation for cox model fit
-dd <- datadist(time.to.pace, gaf, ttmt, pre.cond, kauf.iq, wards.iq, caarms.cd, caarms.tc)
-options(datadist='dd')
-
-
-# Define Surv model
-S <- Surv(dtime, event)
-
-bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
-
+cox.bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 # Get bootstrapped model
-bl.conf <- bootcov(bl, B=1000, pr=TRUE)
+bl.conf <- bootcov(cox.bl, B=1000, pr=TRUE)
+LR.orig <- cox.bl$stats['Model L.R.']
+cox.res <- cox_model(cox.bl, 1, cox.table, overfit.table)
 
-bl.an <- anova(bl.conf)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 2, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-bl.summ <- summary(bl.conf, pre.cond = 3)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + cog1 + cog2, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 3, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-bl.val <- validate(bl, method="boot", B=1000, bw=FALSE)
-
-LR.orig <- bl$stats['Model L.R.']
-
-cox.table[1,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[6,4], bl.an[3,3], bl.summ[8,4], bl.an[3,3], 0, 0, 0, 0, LR.orig, 0, 1, bl.val['Dxy', 'index.corrected']/2 + 0.5)
-
-
-bl.caarms <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
-
-# Get bootstrapped model
-bl.caarms.conf <- bootcov(bl.caarms, B=1000, pr=TRUE)
-
-bl.caarms.an <- anova(bl.caarms.conf)
-
-bl.caarms.summ <- summary(bl.caarms.conf, pre.cond = 3)
-
-bl.caarms.val <- validate(bl.caarms, method="boot", B=1000, bw=FALSE)
-
-bl.caarms.p <- lrtest(bl.conf, bl.caarms.conf)
-
-cox.table[2,] <- c(bl.caarms.summ[2,4], bl.caarms.an[1,3], bl.caarms.summ[4,4], bl.caarms.an[2,3], bl.caarms.summ[10,4], bl.caarms.an[3,3], bl.caarms.summ[12,4], bl.caarms.an[3,3], bl.caarms.summ[6,4], bl.caarms.an[4,3], bl.caarms.summ[8,4], bl.caarms.an[5,3], bl.caarms$stats['Model L.R.'], bl.caarms.p$stats['P'], 1-(LR.orig/bl.caarms$stats['Model L.R.']), bl.caarms.val['Dxy', 'index.corrected']/2 + 0.5)
-
-
-bl.cog <- cph(S ~ time.to.pace + gaf + pre.cond + kauf.iq + wards.iq,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 10*12)
-
-# Get bootstrapped model
-bl.cog.conf <- bootcov(bl.cog, B=1000, pr=TRUE)
-
-bl.cog.an <- anova(bl.cog.conf)
-
-bl.cog.summ <- summary(bl.cog.conf, pre.cond = 3)
-
-bl.cog.p <- lrtest(bl.conf, bl.cog.conf)
-
-bl.cog.val <- validate(bl.cog, method="boot", B=1000, bw=FALSE)
-
-cox.table[3,] <- c(bl.cog.summ[2,4], bl.cog.an[1,3], bl.cog.summ[4,4], bl.cog.an[2,3], bl.cog.summ[10,4], bl.cog.an[3,3], bl.cog.summ[12,4], bl.cog.an[3,3], bl.cog.summ[6,4], bl.cog.an[4,3], bl.cog.summ[8,4], bl.cog.an[5,3], bl.cog$stats['Model L.R.'], bl.cog.p$stats['P'], 1-(LR.orig/bl.cog$stats['Model L.R.']), bl.cog.val['Dxy', 'index.corrected']/2 + 0.5)
-
-overfit.table[3,] <- c(bl.cog.val['Dxy', 'optimism'], bl.cog.val['R2','optimism'], bl.cog.val['Slope','optimism'])
+cox.table <- cox.res[[1]]
+overfit.table <- cox.res[[2]]
 
 ```
 
@@ -898,13 +796,6 @@ set.seed(1234)
 lasso.fit.cv <- cv.glmnet(x = x.train, y = y.train, type.measure = "deviance",
                      family = "cox", nfolds = 10, alpha = 1, standardize = TRUE)
 
-
-lasso.coef <- function(data, indices) {
-  d <- data[indices,]
-  fit <- glmnet(x = d[,c(3:ncol(d))], y = d[,c(1,2)], 
-                    alpha = 1, family = "cox", lambda = get_lambda(lasso.fit.cv, 0.25), standardize = TRUE)
-  return(coef(fit)[,1])
-}
 
 boot.out <- boot(data = cbind(y.train, x.train), statistic = lasso.coef, R = 1000)
 
