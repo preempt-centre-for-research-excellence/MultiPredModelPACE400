@@ -9,8 +9,6 @@ output:
   html_document:
     df_print: paged
 always_allow_html: true
-bibliography: PACE400.bib
-csl: biological-psychiatry.csl
 editor_options:
   chunk_output_type: inline
 ---
@@ -43,6 +41,128 @@ pca.table <- function(table.tmp, ind, a, b) {
   table.tmp[1:20,ind] <- c(tmp.a$importance['Proportion of Variance',c(1:10)], tmp.b$importance['Proportion of Variance',c(1:10)])
   return(table.tmp)
 }
+
+get_lambda <- function(fit, tol = .5) {
+  error <- fit$cvm[fit$lambda == fit$lambda.min]
+  sd <- fit$cvsd[fit$lambda == fit$lambda.min]
+  tolerance <- error + tol*sd
+  max(fit$lambda[fit$cvm < tolerance])
+}
+
+pca_plot <- function(plot.data, title){
+  
+  tmp.plot <- ggplot(plot.data, aes(x = x, y = value, group = variable)) + 
+    geom_line(aes(color = variable), size = 1.1) +
+    geom_point(aes(color = variable), size = 3) +
+    scale_x_continuous(name ="First ten principal components", breaks = c(1:10),
+                limits=c(1,10)) +
+    scale_y_continuous(name="% of variance explained", breaks = c(0,25,50,75), limits=c(0, 75)) +
+    theme_bw() +
+    scale_color_brewer(palette="Set1") +
+    ggtitle(title) + 
+    labs(color = 'Cortical measure') +
+    theme(plot.title = element_text(size = 18, hjust = 0.5),
+         axis.title.x = element_text(size = 16),
+         axis.title.y = element_text(size = 16),
+         legend.text = element_text(size = 14),
+         legend.title = element_text(size = 16),
+         axis.text.x = element_text(size = 14),
+         axis.text.y = element_text(size = 14)) +
+    theme(legend.position="bottom")
+  return(tmp.plot)
+}
+
+
+loading_plot <- function(domain.data.lh, domain.data.rh, title){
+
+  load_lh <- domain.data.lh$rotation[,1]
+  lh_best <- as.data.frame(abs(load_lh[names(sort(abs(load_lh), decreasing = TRUE)[1:10])]))
+  lh_best$area <- rownames(lh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
+  colnames(lh_best) <- c('Loading', 'Area')
+  lh_best$Area <- factor(lh_best$Area, levels = lh_best$Area)
+  
+  load_rh <- domain.data.rh$rotation[,1]
+  rh_best <- as.data.frame(abs(load_rh[names(sort(abs(load_rh), decreasing = TRUE)[1:10])]))
+  rh_best$area <- rownames(rh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
+  colnames(rh_best) <- c('Loading', 'Area')
+  rh_best$Area <- factor(rh_best$Area, levels = rh_best$Area)
+  
+  left_loading <- ggplot(lh_best, aes(x=Loading, y=Area))+
+    geom_bar(stat="identity", width=0.7, fill="steelblue")+
+    theme_minimal() +
+    scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
+    scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
+    ggtitle('Left hemisphere') +
+    theme(plot.title = element_text(size = 18, hjust = 0.5),
+       axis.title.x = element_text(size = 16),
+       axis.title.y = element_text(size = 16),
+       legend.text = element_text(size = 14),
+       legend.title = element_text(size = 16),
+       axis.text.x = element_text(size = 14),
+       axis.text.y = element_text(size = 14)) 
+  
+  right_loading <- ggplot(rh_best, aes(x=Loading, y=Area))+
+    geom_bar(stat="identity", width=0.7, fill="steelblue")+
+    theme_minimal() +
+    scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
+    scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
+    ggtitle('Right hemisphere') +
+    theme(plot.title = element_text(size = 18, hjust = 0.5),
+       axis.title.x = element_text(size = 16),
+       axis.title.y = element_text(size = 16),
+       legend.text = element_text(size = 14),
+       legend.title = element_text(size = 16),
+       axis.text.x = element_text(size = 14),
+       axis.text.y = element_text(size = 14)) 
+  
+  plot.loading <- ggarrange(left_loading, right_loading, ncol = 2 )
+  plot.loading <- annotate_figure(thick.loading, top = text_grob(title, 
+                 face = "bold", size = 20))
+  
+  return(plot.loading)
+}
+
+cox_model <- function(S, time.to.pace, gaf, pre.cond, i, cox.table, overfit.table, ...){
+  x <- list(...)
+  if (length(x) > 0){
+    pc.l <- x[[1]]
+    pc.r <- x[[2]]
+    bl <- cph(S ~ time.to.pace + gaf + pre.cond + pc.l + pc.r, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+  }else{
+    dd <- datadist(time.to.pace, gaf, pre.cond)
+    options(datadist="dd")
+    bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+  }
+  # Get bootstrapped model
+  bl.conf <- bootcov(bl, B=1000, pr=TRUE)
+  # Extract regression parameters for each predictor
+  bl.an <- anova(bl.conf)
+  # Store regression summary
+  dd <- datadist(time.to.pace, gaf, pre.cond, pc.l, pc.r)
+  options(datadist="dd")
+  bl.summ <- summary(bl.conf, pre.cond = 3)
+  # Internal validation using bootstrapping
+  bl.val <- validate(bl, method="boot", B=1000, bw=FALSE)
+  # Store overfitting values
+  overfit.table[i,] <- c(bl.val['Dxy', 'optimism'], bl.val['R2','optimism'], bl.val['Slope','optimism'])
+  
+  if (length(x) > 0){
+    bl.p <- lrtest(x[[3]], bl.conf)
+  
+    cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[10,4], bl.an[3,3],bl.summ[12,4], bl.an[3,3], bl.summ[6,4], bl.an[4,3], bl.summ[8,4], bl.an[5,3], bl$stats['Model L.R.'], bl.p$stats['P'], 1-(x[[4]]/bl$stats['Model L.R.']), bl.val['Dxy', 'index.corrected']/2 + 0.5)
+    
+    return(list(cox.table, overfit.table))
+  }else{
+
+    # Assign likelihood ratio test
+    LR.orig <- bl$stats['Model L.R.']
+    # Store regression results
+    cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[6,4], bl.an[3,3], bl.summ[8,4], bl.an[3,3], 0, 0, 0, 0, LR.orig, 0, 1, bl.val['Dxy',   'index.corrected']/2 + 0.5)
+    return(list(cox.table, overfit.table, bl.conf, LR.orig))
+  }
+  
+}
+
 ```
 
 ## Load data
@@ -283,230 +403,18 @@ pc_right <- pc[11:20,]*100
 pc_right$x <- 1:10
 pc_right_plot <- melt(pc_right, id.vars = "x")
 
-
-pca_left_plot <- ggplot(pc_left_plot, aes(x = x, y = value, group = variable)) + 
-       geom_line(aes(color = variable), size = 1.1) +
-       geom_point(aes(color = variable), size = 3) +
-       scale_x_continuous(name ="First ten principal components", breaks = c(1:10),
-                    limits=c(1,10)) +
-       scale_y_continuous(name="% of variance explained", breaks = c(0,25,50,75), limits=c(0, 75)) +
-       theme_bw() +
-       scale_color_brewer(palette="Set1") +
-       ggtitle('Left hemisphere') + 
-       labs(color = 'Cortical measure') +
-       theme(plot.title = element_text(size = 18, hjust = 0.5),
-             axis.title.x = element_text(size = 16),
-             axis.title.y = element_text(size = 16),
-             legend.text = element_text(size = 14),
-             legend.title = element_text(size = 16),
-             axis.text.x = element_text(size = 14),
-             axis.text.y = element_text(size = 14)) +
-       theme(legend.position="bottom")
-
-pca_right_plot <- ggplot(pc_right_plot, aes(x = x, y = value, group = variable)) + 
-       geom_line(aes(color = variable), size = 1.1) +
-       geom_point(aes(color = variable), size = 3) +
-       scale_x_continuous(name ="First ten principal components", breaks = c(1:10),
-                    limits=c(1,10)) +
-       scale_y_continuous(name="% of variance explained", breaks = c(0,25,50,75), limits=c(0, 75)) +
-       theme_bw() +
-       scale_color_brewer(palette="Set1") +
-       ggtitle('Right hemisphere') + 
-       labs(color = 'Cortical measure') +
-       theme(plot.title = element_text(size = 18, hjust = 0.5),
-             axis.title.x = element_text(size = 16),
-             axis.title.y = element_text(size = 16),
-             legend.text = element_text(size = 14),
-             legend.title = element_text(size = 16),
-             axis.text.x = element_text(size = 14),
-             axis.text.y = element_text(size = 14)) +
-       theme(legend.position="bottom")
+pca_left_plot <- pca_plot(pc_left_plot, 'Left hemisphere')
+pca_right_plot <- pca_plot(pc_right_plot, 'Right hemisphere')
 
 ggarrange(pca_left_plot, pca_right_plot, ncol = 2, common.legend = TRUE, legend = "bottom")
 
 
 # Thickness loading
-load_thick_lh <- PACE_MRIthick.pcalh$rotation[,1]
-thick_lh_best <- as.data.frame(abs(load_thick_lh[names(sort(abs(load_thick_lh), decreasing = TRUE)[1:10])]))
-thick_lh_best$area <- rownames(thick_lh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-colnames(thick_lh_best) <- c('Loading', 'Area')
-thick_lh_best$Area <- factor(thick_lh_best$Area, levels = thick_lh_best$Area)
 
-load_thick_rh <- PACE_MRIthick.pcarh$rotation[,1]
-thick_rh_best <- as.data.frame(abs(load_thick_rh[names(sort(abs(load_thick_rh), decreasing = TRUE)[1:10])]))
-thick_rh_best$area <- rownames(thick_rh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-colnames(thick_rh_best) <- c('Loading', 'Area')
-thick_rh_best$Area <- factor(thick_rh_best$Area, levels = thick_rh_best$Area)
-
-left_loading <- ggplot(thick_lh_best, aes(x=Loading, y=Area))+
-  geom_bar(stat="identity", width=0.7, fill="steelblue")+
-  theme_minimal() +
-  scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-  scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-  ggtitle('Left hemisphere') +
-  theme(plot.title = element_text(size = 18, hjust = 0.5),
-     axis.title.x = element_text(size = 16),
-     axis.title.y = element_text(size = 16),
-     legend.text = element_text(size = 14),
-     legend.title = element_text(size = 16),
-     axis.text.x = element_text(size = 14),
-     axis.text.y = element_text(size = 14)) 
-
-right_loading <- ggplot(thick_rh_best, aes(x=Loading, y=Area))+
-  geom_bar(stat="identity", width=0.7, fill="steelblue")+
-  theme_minimal() +
-  scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-  scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-  ggtitle('Right hemisphere') +
-  theme(plot.title = element_text(size = 18, hjust = 0.5),
-     axis.title.x = element_text(size = 16),
-     axis.title.y = element_text(size = 16),
-     legend.text = element_text(size = 14),
-     legend.title = element_text(size = 16),
-     axis.text.x = element_text(size = 14),
-     axis.text.y = element_text(size = 14)) 
-
-thick.loading <- ggarrange(left_loading, right_loading, ncol = 2 )
-
-thick.loading <- annotate_figure(thick.loading, top = text_grob("Thickness", 
-               face = "bold", size = 20))
-# Area loading
-load_surf_lh <- PACE_MRIsurf.pcalh$rotation[,1]
-surf_lh_best <- as.data.frame(abs(load_surf_lh[names(sort(abs(load_surf_lh), decreasing = TRUE)[1:10])]))
-surf_lh_best$area <- rownames(surf_lh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-colnames(surf_lh_best) <- c('Loading', 'Area')
-surf_lh_best$Area <- factor(surf_lh_best$Area, levels = surf_lh_best$Area)
-
-load_surf_rh <- PACE_MRIsurf.pcarh$rotation[,1]
-surf_rh_best <- as.data.frame(abs(load_surf_rh[names(sort(abs(load_surf_rh), decreasing = TRUE)[1:10])]))
-surf_rh_best$area <- rownames(surf_rh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-colnames(surf_rh_best) <- c('Loading', 'Area')
-surf_rh_best$Area <- factor(surf_rh_best$Area, levels = surf_rh_best$Area)
-
-left_loading <- ggplot(surf_lh_best, aes(x=Loading, y=Area))+
-  geom_bar(stat="identity", width=0.7, fill="steelblue")+
-  theme_minimal() +
-  scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-  scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-  ggtitle('Left hemisphere') +
-  theme(plot.title = element_text(size = 18, hjust = 0.5),
-     axis.title.x = element_text(size = 16),
-     axis.title.y = element_text(size = 16),
-     legend.text = element_text(size = 14),
-     legend.title = element_text(size = 16),
-     axis.text.x = element_text(size = 14),
-     axis.text.y = element_text(size = 14)) 
-
-right_loading <- ggplot(surf_rh_best, aes(x=Loading, y=Area))+
-  geom_bar(stat="identity", width=0.7, fill="steelblue")+
-  theme_minimal() +
-  scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-  scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-  ggtitle('Right hemisphere') +
-  theme(plot.title = element_text(size = 18, hjust = 0.5),
-     axis.title.x = element_text(size = 16),
-     axis.title.y = element_text(size = 16),
-     legend.text = element_text(size = 14),
-     legend.title = element_text(size = 16),
-     axis.text.x = element_text(size = 14),
-     axis.text.y = element_text(size = 14)) 
-
-surf.loading <- ggarrange(left_loading, right_loading, ncol = 2 )
-
-surf.loading <- annotate_figure(surf.loading, top = text_grob("Area", 
-               face = "bold", size = 20))
-
-# Volume loading
-load_vol_lh <- PACE_MRIvol.pcalh$rotation[,1]
-vol_lh_best <- as.data.frame(abs(load_vol_lh[names(sort(abs(load_vol_lh), decreasing = TRUE)[1:10])]))
-vol_lh_best$area <- rownames(vol_lh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-colnames(vol_lh_best) <- c('Loading', 'Area')
-vol_lh_best$Area <- factor(vol_lh_best$Area, levels = vol_lh_best$Area)
-
-load_vol_rh <- PACE_MRIvol.pcarh$rotation[,1]
-vol_rh_best <- as.data.frame(abs(load_vol_rh[names(sort(abs(load_vol_rh), decreasing = TRUE)[1:10])]))
-vol_rh_best$area <- rownames(vol_rh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-colnames(vol_rh_best) <- c('Loading', 'Area')
-vol_rh_best$Area <- factor(vol_rh_best$Area, levels = vol_rh_best$Area)
-
-left_loading <- ggplot(vol_lh_best, aes(x=Loading, y=Area))+
-  geom_bar(stat="identity", width=0.7, fill="steelblue")+
-  theme_minimal() +
-  scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-  scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-  ggtitle('Left hemisphere') +
-  theme(plot.title = element_text(size = 18, hjust = 0.5),
-     axis.title.x = element_text(size = 16),
-     axis.title.y = element_text(size = 16),
-     legend.text = element_text(size = 14),
-     legend.title = element_text(size = 16),
-     axis.text.x = element_text(size = 14),
-     axis.text.y = element_text(size = 14)) 
-
-right_loading <- ggplot(vol_rh_best, aes(x=Loading, y=Area))+
-  geom_bar(stat="identity", width=0.7, fill="steelblue")+
-  theme_minimal() +
-  scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-  scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-  ggtitle('Right hemisphere') +
-  theme(plot.title = element_text(size = 18, hjust = 0.5),
-     axis.title.x = element_text(size = 16),
-     axis.title.y = element_text(size = 16),
-     legend.text = element_text(size = 14),
-     legend.title = element_text(size = 16),
-     axis.text.x = element_text(size = 14),
-     axis.text.y = element_text(size = 14)) 
-
-vol.loading <- ggarrange(left_loading, right_loading, ncol = 2 )
-
-vol.loading <- annotate_figure(vol.loading, top = text_grob("Volume", 
-               face = "bold", size = 20))
-
-# Curve loading
-load_curve_lh <- PACE_MRIcurve.pcalh$rotation[,1]
-curve_lh_best <- as.data.frame(abs(load_curve_lh[names(sort(abs(load_curve_lh), decreasing = TRUE)[1:10])]))
-curve_lh_best$area <- rownames(curve_lh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-colnames(curve_lh_best) <- c('Loading', 'Area')
-curve_lh_best$Area <- factor(curve_lh_best$Area, levels = curve_lh_best$Area)
-
-load_curve_rh <- PACE_MRIcurve.pcarh$rotation[,1]
-curve_rh_best <- as.data.frame(abs(load_curve_rh[names(sort(abs(load_curve_rh), decreasing = TRUE)[1:10])]))
-curve_rh_best$area <- rownames(curve_rh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-colnames(curve_rh_best) <- c('Loading', 'Area')
-curve_rh_best$Area <- factor(curve_rh_best$Area, levels = curve_rh_best$Area)
-
-left_loading <- ggplot(curve_lh_best, aes(x=Loading, y=Area))+
-  geom_bar(stat="identity", width=0.7, fill="steelblue")+
-  theme_minimal() +
-  scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-  scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-  ggtitle('Left hemisphere') +
-  theme(plot.title = element_text(size = 18, hjust = 0.5),
-     axis.title.x = element_text(size = 16),
-     axis.title.y = element_text(size = 16),
-     legend.text = element_text(size = 14),
-     legend.title = element_text(size = 16),
-     axis.text.x = element_text(size = 14),
-     axis.text.y = element_text(size = 14)) 
-
-right_loading <- ggplot(curve_rh_best, aes(x=Loading, y=Area))+
-  geom_bar(stat="identity", width=0.7, fill="steelblue")+
-  theme_minimal() +
-  scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-  scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-  ggtitle('Right hemisphere') +
-  theme(plot.title = element_text(size = 18, hjust = 0.5),
-     axis.title.x = element_text(size = 16),
-     axis.title.y = element_text(size = 16),
-     legend.text = element_text(size = 14),
-     legend.title = element_text(size = 16),
-     axis.text.x = element_text(size = 14),
-     axis.text.y = element_text(size = 14)) 
-
-curve.loading <- ggarrange(left_loading, right_loading, ncol = 2 )
-
-curve.loading <- annotate_figure(curve.loading, top = text_grob("Mean curvature", 
-               face = "bold", size = 20))
+thick.loading <- loading_plot(PACE_MRIthick.pcalh, PACE_MRIthick.pcarh, 'Thickness')
+vol.loading <- loading_plot(PACE_MRIvol.pcalh, PACE_MRIvol.pcarh, 'Volume')
+curve.loading <- loading_plot(PACE_MRIcurve.pcalh, PACE_MRIcurve.pcarh, 'Mean curvature')
+surf.loading <- loading_plot(PACE_MRIsurf.pcalh, PACE_MRIsurf.pcarh, 'Area')
 
 ggarrange(thick.loading, vol.loading, curve.loading, surf.loading, nrow = 4)
 
@@ -520,6 +428,46 @@ ggarrange(thick.loading, vol.loading, curve.loading, surf.loading, nrow = 4)
 # Calculate time to event and event status
 dtime <- PACE_MRI$transmonths
 event <- PACE_MRI$transtat
+
+# Preparation for imputation
+w <- transcan(~ timepace + gaf + cd + tc + ttmt + pre.cond + surface_lh + surface_rh + thickness_lh + thickness_rh + volume_lh + volume_rh + curvature_lh + curvature_rh + corrected_gap + age_bl, imputed=TRUE, data = PACE_MRI, pl=FALSE, pr = FALSE)
+
+# create variables out of columns
+attach(PACE_MRI)
+
+# Imputation (theoretically not needed)
+time.to.pace <- log(impute(w, timepace, data = PACE_MRI))
+gaf <- impute(w, gaf, data = PACE_MRI)
+caarms.tc <- impute(w, tc, data = PACE_MRI)
+caarms.cd <- impute(w, cd, data = PACE_MRI)
+ttmt <- impute(w, ttmt, data = PACE_MRI)
+pre.cond <- impute(w, pre.cond, data = PACE_MRI)
+pre.cond <- relevel(factor(pre.cond),ref='3')
+pc1.surf <- impute(w, surface_lh, data = PACE_MRI)
+pc2.surf <- impute(w, surface_rh, data = PACE_MRI)
+pc1.thick <- impute(w, thickness_lh, data = PACE_MRI)
+pc2.thick <- impute(w, thickness_rh, data = PACE_MRI)
+pc1.vol <- impute(w, volume_lh, data = PACE_MRI)
+pc2.vol <- impute(w, volume_rh, data = PACE_MRI)
+pc1.curve <- impute(w, curvature_lh, data = PACE_MRI)
+pc2.curve <- impute(w, curvature_rh, data = PACE_MRI)
+brain_age <- impute(w, corrected_gap, data = PACE_MRI)
+age <- impute(w, age_bl, data = PACE_MRI)
+
+# Preperation for cox model fit
+dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, ttmt, pre.cond, pc1.surf, pc2.surf, pc1.thick, pc2.thick, pc1.vol, pc2.vol, pc1.curve, pc2.curve, brain_age, age)
+options(datadist='dd')
+units(dtime) <- 'Month'
+
+# Define Surv model
+S <- Surv(dtime, event)
+
+set.seed(12)
+```
+
+Cox model using clinical variables
+
+```{r, echo=FALSE}
 
 # Create empty data frames for regression results table
 cox.table <- data.frame(hr1=double(),
@@ -544,229 +492,21 @@ overfit.table <- data.frame(delta_Dxy=double(),
                  delta_R2=double(), 
                  delta_slope=double())
 
-# Preparation for imputation
-w <- transcan(~ timepace + gaf + sanst + qlst + bprst + pa + cd + tc + atten + vulner + ttmt + pre.cond , imputed=TRUE, data = PACE_MRI, pl=FALSE, pr = FALSE)
+a <- cox_model(S, time.to.pace, gaf, pre.cond, 1, cox.table, overfit.table)
+bl.conf <- a[[3]]
+LR.orig <- a[[4]]
 
-# create variables out of columns
-attach(PACE_MRI)
+a <- cox_model(S, time.to.pace, gaf, pre.cond, 2, a[[1]], a[[2]], caarms.tc, caarms.cd, bl.conf, LR.orig)
+a <- cox_model(S, time.to.pace, gaf, pre.cond, 3, a[[1]], a[[2]], pc1.surf, pc2.surf, bl.conf, LR.orig)
+a <- cox_model(S, time.to.pace, gaf, pre.cond, 4, a[[1]], a[[2]], pc1.vol, pc2.vol, bl.conf, LR.orig)
+a <- cox_model(S, time.to.pace, gaf, pre.cond, 5, a[[1]], a[[2]], pc1.curve, pc2.curve, bl.conf, LR.orig)
+a <- cox_model(S, time.to.pace, gaf, pre.cond, 6, a[[1]], a[[2]], pc1.thick, pc2.thick, bl.conf, LR.orig)
+a <- cox_model(S, time.to.pace, gaf, pre.cond, 7, a[[1]], a[[2]], brain_age, age, bl.conf, LR.orig)
 
-# Imputation
-time.to.pace <- log(impute(w, timepace, data = PACE_MRI))
-gaf <- impute(w, gaf, data = PACE_MRI)
-sans <- impute(w, sanst, data = PACE_MRI)
-qls <- impute(w, qlst, data = PACE_MRI)
-bprs <- impute(w, bprst, data = PACE_MRI)
-caarms.tc <- impute(w, tc, data = PACE_MRI)
-caarms.cd <- impute(w, cd, data = PACE_MRI)
-caarms.pa <- impute(w, pa, data = PACE_MRI)
-atten <- impute(w, atten, data = PACE_MRI)
-vulner <- impute(w, vulner, data = PACE_MRI)
-ttmt <- impute(w, ttmt, data = PACE_MRI)
-pre.cond <- impute(w, pre.cond, data = PACE_MRI)
-
-pre.cond <- relevel(factor(pre.cond),ref='3')
-
-# Preperation for cox model fit
-dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, caarms.pa, ttmt, pre.cond)
-options(datadist='dd')
-
-# Define Surv model
-S <- Surv(dtime, event)
-
-set.seed(12)
-```
-
-Cox model using clinical variables
-
-```{r, echo=FALSE}
-
-# Compute clinical model
-bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
-# Get bootstrapped model
-bl.conf <- bootcov(bl, B=1000, pr=TRUE)
-# Extract regression parameters for each predictor
-bl.an <- anova(bl.conf)
-# Store regression summary
-bl.summ <- summary(bl.conf, pre.cond = 3)
-# Internal validation using bootstrapping
-bl.val <- validate(bl, method="boot", B=1000, bw=FALSE)
-# Store overfitting values
-overfit.table[1,] <- c(bl.val['Dxy', 'optimism'], bl.val['R2','optimism'], bl.val['Slope','optimism'])
-# Assign likelihood ratio test
-LR.orig <- bl$stats['Model L.R.']
-# Store regression results
-cox.table[1,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[6,4], bl.an[3,3], bl.summ[8,4], bl.an[3,3], 0, 0, 0, 0, LR.orig, 0, 1, bl.val['Dxy', 'index.corrected']/2 + 0.5)
-
+cox.table <- a[[1]]
+overfit.table <- a[[2]]
 
 ```
-
-Cox model using clinical plus CAARMS variables
-
-```{r, echo=FALSE}
-
-bl.caarms <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
-
-bl.caarms.conf <- bootcov(bl.caarms, B=1000, pr=TRUE)
-
-bl.caarms.an <- anova(bl.caarms.conf)
-
-bl.caarms.summ <- summary(bl.caarms.conf, pre.cond = 3)
-
-bl.caarms.val <- validate(bl.caarms.conf, method="boot", B=1000, bw=FALSE)
-
-bl.caarms.p <- lrtest(bl.conf, bl.caarms)
-
-cox.table[2,] <- c(bl.caarms.summ[2,4], bl.caarms.an[1,3], bl.caarms.summ[4,4], bl.caarms.an[2,3], bl.caarms.summ[10,4], bl.caarms.an[3,3],bl.caarms.summ[12,4], bl.caarms.an[3,3], bl.caarms.summ[6,4], bl.caarms.an[4,3], bl.caarms.summ[8,4], bl.caarms.an[5,3], bl.caarms$stats['Model L.R.'], bl.caarms.p$stats['P'], 1-(LR.orig/bl.caarms$stats['Model L.R.']), bl.caarms.val['Dxy', 'index.corrected']/2 + 0.5)
-
-overfit.table[2,] <- c(bl.caarms.val['Dxy', 'optimism'], bl.caarms.val['R2','optimism'], bl.caarms.val['Slope','optimism'])
-
-```
-
-Cox model using clinical variables and MRI surface
-
-```{r, echo=FALSE}
-
-pc1.surf <- PACE_MRI$surface_lh
-pc2.surf <- PACE_MRI$surface_rh
-
-dd <- datadist(time.to.pace, gaf, pc1.surf,pc2.surf, pre.cond)
-options(datadist='dd')
-units(dtime) <- 'Month'
-
-bl.surf <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.surf + pc2.surf,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 10*12)
-
-bl.surf.conf <- bootcov(bl.surf, B=1000, pr=TRUE)
-
-bl.surf.an <- anova(bl.surf.conf)
-
-bl.surf.summ <- summary(bl.surf.conf, pre.cond = 3)
-
-bl.surf.p <- lrtest(bl.conf, bl.surf.conf)
-
-bl.surf.val <- validate(bl.surf, method="boot", B=1000, bw=FALSE)
-
-cox.table[3,] <- c(bl.surf.summ[2,4], bl.surf.an[1,3], bl.surf.summ[4,4], bl.surf.an[2,3], bl.surf.summ[10,4], bl.surf.an[3,3], bl.surf.summ[12,4], bl.surf.an[3,3], bl.surf.summ[6,4], bl.surf.an[4,3], bl.surf.summ[8,4], bl.surf.an[5,3], bl.surf$stats['Model L.R.'], bl.surf.p$stats['P'], 1-(LR.orig/bl.surf$stats['Model L.R.']), bl.surf.val['Dxy', 'index.corrected']/2 + 0.5)
-
-overfit.table[3,] <- c(bl.surf.val['Dxy', 'optimism'], bl.surf.val['R2','optimism'], bl.surf.val['Slope','optimism'])
-
-```
-
-Cox model using clinical variables and MRI mean curvature
-
-```{r, echo=FALSE}
-
-pc1.curve <- PACE_MRI$curvature_lh
-pc2.curve <- PACE_MRI$curvature_rh
-
-dd <- datadist(time.to.pace, gaf, pc1.curve,pc2.curve, pre.cond)
-options(datadist='dd')
-units(dtime) <- 'Month'
-
-bl.curve <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.curve + pc2.curve,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 10*12)
-
-bl.curve.conf <- bootcov(bl.curve, B=1000, pr=TRUE)
-
-bl.curve.an <- anova(bl.curve.conf)
-
-bl.curve.summ <- summary(bl.curve.conf, pre.cond = 3)
-
-bl.curve.p <- lrtest(bl.conf, bl.curve.conf)
-
-bl.curve.val <- validate(bl.curve, method="boot", B=1000, bw=FALSE)
-
-cox.table[4,] <- c(bl.curve.summ[2,4], bl.curve.an[1,3], bl.curve.summ[4,4], bl.curve.an[2,3], bl.curve.summ[10,4], bl.curve.an[3,3], bl.curve.summ[12,4], bl.curve.an[3,3], bl.curve.summ[6,4], bl.curve.an[4,3], bl.curve.summ[8,4], bl.curve.an[5,3], bl.curve$stats['Model L.R.'], bl.curve.p$stats['P'], 1-(LR.orig/bl.curve$stats['Model L.R.']), bl.curve.val['Dxy', 'index.corrected']/2 + 0.5)
-
-overfit.table[4,] <- c(bl.curve.val['Dxy', 'optimism'], bl.curve.val['R2','optimism'], bl.curve.val['Slope','optimism'])
-
-```
-
-Cox model using clinical variables and MRI volume
-
-```{r, echo=FALSE}
-
-
-pc1.vol <- PACE_MRI$volume_lh
-pc2.vol <- PACE_MRI$volume_rh
-dd <- datadist(time.to.pace, gaf, pc1.vol,pc2.vol, pre.cond)
-options(datadist='dd')
-units(dtime) <- 'Month'
-
-bl.vol <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.vol + pc2.vol,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 10*12)
-
-bl.vol.conf <- bootcov(bl.vol, B=1000, pr=TRUE)
-
-bl.vol.an <- anova(bl.vol.conf)
-
-bl.vol.summ <- summary(bl.vol.conf, pre.cond = 3)
-
-bl.vol.p <- lrtest(bl.conf, bl.vol.conf)
-
-bl.vol.val <- validate(bl.vol, method="boot", B=1000, bw=FALSE)
-
-cox.table[5,] <- c(bl.vol.summ[2,4], bl.vol.an[1,3], bl.vol.summ[4,4], bl.vol.an[2,3], bl.vol.summ[10,4], bl.vol.an[3,3], bl.vol.summ[12,4], bl.vol.an[3,3], bl.vol.summ[6,4], bl.vol.an[4,3], bl.vol.summ[8,4], bl.vol.an[5,3], bl.vol$stats['Model L.R.'], bl.vol.p$stats['P'], 1-(LR.orig/bl.vol$stats['Model L.R.']), bl.vol.val['Dxy', 'index.corrected']/2 + 0.5)
-
-overfit.table[5,] <- c(bl.vol.val['Dxy', 'optimism'], bl.vol.val['R2','optimism'], bl.vol.val['Slope','optimism'])
-
-```
-
-Cox model using clinical variables and MRI thickness
-
-```{r, echo=FALSE}
-
-pc1.thick <- PACE_MRI$thickness_lh
-pc2.thick <- PACE_MRI$thickness_rh
-
-dd <- datadist(time.to.pace, gaf, pc1.thick,pc2.thick, pre.cond)
-options(datadist='dd')
-units(dtime) <- 'Month'
-
-bl.thick <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.thick + pc2.thick,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 10*12)
-
-bl.thick.conf <- bootcov(bl.thick, B=1000, pr=TRUE)
-
-bl.thick.an <- anova(bl.thick.conf)
-
-bl.thick.summ <- summary(bl.thick.conf, pre.cond = 3)
-
-bl.thick.p <- lrtest(bl.conf, bl.thick.conf)
-
-bl.thick.val <- validate(bl.thick, method="boot", B=1000, bw=FALSE)
-
-cox.table[6,] <- c(bl.thick.summ[2,4], bl.thick.an[1,3], bl.thick.summ[4,4], bl.thick.an[2,3], bl.thick.summ[10,4], bl.thick.an[3,3], bl.thick.summ[12,4], bl.thick.an[3,3], bl.thick.summ[6,4], bl.thick.an[4,3], bl.thick.summ[8,4], bl.thick.an[5,3], bl.thick$stats['Model L.R.'], bl.thick.p$stats['P'], 1-(LR.orig/bl.thick$stats['Model L.R.']), bl.thick.val['Dxy', 'index.corrected']/2 + 0.5)
-
-overfit.table[6,] <- c(bl.thick.val['Dxy', 'optimism'], bl.thick.val['R2','optimism'], bl.thick.val['Slope','optimism'])
-
-```
-
-Cox model using clinical variables and brain age gap plus age
-
-```{r, echo=FALSE}
-
-brain_age <- PACE_MRI$corrected_gap
-age <- PACE_MRI$age_bl
-
-dd <- datadist(time.to.pace, gaf, brain_age, age, pre.cond)
-options(datadist='dd')
-units(dtime) <- 'Month'
-
-bl.brainage <- cph(S ~ time.to.pace + gaf + pre.cond + brain_age + age,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 10*12)
-
-bl.brainage.conf <- bootcov(bl.brainage, B=1000, pr=TRUE)
-
-bl.brainage.an <- anova(bl.brainage.conf)
-
-bl.brainage.summ <- summary(bl.brainage.conf, pre.cond = 3)
-
-bl.brainage.p <- lrtest(bl.conf, bl.brainage.conf)
-
-bl.brainage.val <- validate(bl.brainage, method="boot", B=1000, bw=FALSE)
-
-cox.table[7,] <- c(bl.brainage.summ[2,4], bl.brainage.an[1,3], bl.brainage.summ[4,4], bl.brainage.an[2,3], bl.brainage.summ[10,4], bl.brainage.an[3,3], bl.brainage.summ[12,4], bl.brainage.an[3,3], bl.brainage.summ[6,4], bl.brainage.an[4,3], bl.brainage.summ[8,4], bl.brainage.an[5,3], bl.brainage$stats['Model L.R.'], bl.brainage.p$stats['P'], 1-(LR.orig/bl.brainage$stats['Model L.R.']), bl.brainage.val['Dxy', 'index.corrected']/2 + 0.5)
-
-overfit.table[7,] <- c(bl.brainage.val['Dxy', 'optimism'], bl.brainage.val['R2','optimism'], bl.brainage.val['Slope','optimism'])
-
-```
-
 
 ```{r, echo=FALSE}
 cox.table <- round(cox.table, digits = 3)
@@ -1137,14 +877,6 @@ cox.table %>%
 
 ```{r, echo=FALSE,  fig.height = 7, fig.width = 7, fig.align = "center"}
 
-
-get_lambda <- function(fit, tol = .5) {
-  error <- fit$cvm[fit$lambda == fit$lambda.min]
-  sd <- fit$cvsd[fit$lambda == fit$lambda.min]
-  tolerance <- error + tol*sd
-  max(fit$lambda[fit$cvm < tolerance])
-}
-
 PACE_sub <- PACE_MRI[,c('transmonths','transtat','timepace','gaf','pre.cond','caseid')]
 colnames(PACE_sub) <- c('time','status','timepace','gaf','pre.cond','caseid')
 
@@ -1162,7 +894,6 @@ x.lasso<-(x.lasso-lapply(x.lasso, mean, na.rm = TRUE))/lapply(x.lasso, sd, na.rm
 x.train <- as.matrix(x.lasso)
 y.train <- as.matrix(y.lasso)
 
-#penalty.factor=c(0, 0, rep(1, ncol(x.train) - 2)),
 set.seed(1234)
 lasso.fit.cv <- cv.glmnet(x = x.train, y = y.train, type.measure = "deviance",
                      family = "cox", nfolds = 10, alpha = 1, standardize = TRUE)
@@ -1197,65 +928,11 @@ y <- data.frame(t(matrix(unlist(boot.ci.out), ncol = n)))[4:5]
 ci.df <- cbind(x, y)
 names(ci.df) <- c("coef", "l.ci", "u.ci")
 
-# drop intercept from plot using [-1] in vector ci.df$l.ci and ci.df$u.ci (i.e., the intercept is the top row)
 lasso.vars.list <- colnames(x.lasso[,c(1:ncol(x.lasso))])
 sig.vars.index <- which(ci.df$coef != 0)
-#sig.vars.index <- which(ci.df$l.ci > 0 | ci.df$u.ci < 0)
 sig.vars.list <- lasso.vars.list[sig.vars.index]
-sig.vars.df <- ci.df[sig.vars.index,] ## add 1 to omit intercept row
+sig.vars.df <- ci.df[sig.vars.index,]
 sig.vars.df <- cbind(sig.vars.list, round(sig.vars.df,4))
 kable(sig.vars.df[order(abs(sig.vars.df$coef), decreasing = T),])
-
-
-# fit.lasso <- glmnet(x = x.train[,sig.vars.index], y = y.train, 
-#                     alpha = 1, family = "cox", lambda = get_lambda(lasso.fit.cv, 1), standardize = TRUE)
-# 
-# new_sub <- PACE_MRI[,c('transmonths','transtat','log_timepace','gaf','caseid','thickness_lh','thickness_rh')]
-# colnames(new_sub) <- c('time','status','log_timepace','gaf','caseid','thick_lh','thick_rh')
-# 
-# new_sub <- new_sub[which(rowMeans(!is.na(new_sub)) > 0.99), ]
-# new_sub <- subset(new_sub, time > 0 )
-# 
-# x.train2 <- as.matrix(new_sub[,c(3,4,6,7)])
-# y.train2 <- as.matrix(new_sub[,1:2])
-# 
-# fit.thick <- glmnet(x = x.train2, y = y.train2, family = "cox", standardize = TRUE, lambda = get_lambda(lasso.fit.cv, 1))
-# 
-# s1 <- survfit( Surv(y.lasso$time, y.lasso$status) ~ 1)
-# s2 <- survfit(fit.lasso, x = x.train[,sig.vars.index], y = Surv(y.lasso$time, y.lasso$status))
-# s3 <- survfit(fit.thick, x = x.train2, y = Surv(new_sub[,1], new_sub[,2]))
-# 
-# s1_plot <- as.data.frame(cbind(s1$time, s1$surv))
-# s1_plot$class <- 0
-# s2_plot <- as.data.frame(cbind(s2$time, s2$surv))
-# s2_plot$class <- 1
-# s3_plot <- as.data.frame(cbind(s3$time, s3$surv))
-# s3_plot$class <- 2
-# 
-# s_all <- rbind(s1_plot, s2_plot, s3_plot)
-# 
-# plot(cal_int, xlim = c(0, 1), ylim = c(0,1))
-
-# pc1.thick <- PACE_MRIthick$lh_lateralorbitofrontal_thickness
-# pc2.thick <- PACE_MRIthick$lh_rostralmiddlefrontal_thickness
-# 
-# 
-# dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, pre.cond, ttmt, pc1.thick,pc2.thick)
-# options(datadist='dd')
-# units(dtime) <- 'Month'
-# 
-# bl.thick <- cph(S ~ rcs(time.to.pace,4) + gaf + pc1.thick + pc2.thick,  x=TRUE, y=TRUE, surv=TRUE, time.inc = 10*12)
-# 
-# bl.thick.an <- anova(bl.thick)
-# 
-# bl.thick.summ <- summary(bl.thick)
-# 
-# bl.thick.p <- lrtest(bl, bl.thick)
-# 
-# bl.thick.val <- rms::validate(bl.thick, method="boot", B=200, bw=FALSE)
-# 
-# cox.table[7,] <- c(bl.thick.summ[2,4], bl.thick.an[1,3], 0, bl.thick.an[2,3], bl.thick.summ[4,4], bl.thick.an[3,3], bl.thick.summ[6,4], bl.thick.an[4,3], bl.thick.summ[8,4], bl.thick.an[5,3], bl.thick$stats['Model L.R.'], bl.thick.p$stats['P'], 1-(LR.orig/bl.thick$stats['Model L.R.']), bl.thick.val['Dxy', 'index.corrected']/2 + 0.5)
-# 
-# overfit.table[7,] <- c(bl.thick.val['Dxy', 'optimism'], bl.thick.val['R2','optimism'], bl.thick.val['Slope','optimism'])
 
 ```
