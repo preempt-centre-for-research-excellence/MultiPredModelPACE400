@@ -33,6 +33,8 @@ library(cowplot)
 library(survival)
 library(survminer)
 library(sva)
+
+library(gtsummary)
 ```
 
 ## Define functions to calculate correlations and PCA table
@@ -41,10 +43,9 @@ library(sva)
 #### PCA table function #####
 #### Input: data frame for table, column index, PCA summaries for both hemispheres
 #### Output: ggplot object
-pca.table <- function(table.tmp, ind, a, b) {
+pca.table <- function(table.tmp, ind, a) {
   tmp.a <- summary(a)
-  tmp.b <- summary(b)
-  table.tmp[1:20,ind] <- c(tmp.a$importance['Proportion of Variance',c(1:10)], tmp.b$importance['Proportion of Variance',c(1:10)])
+  table.tmp[1:10,ind] <- c(tmp.a$importance['Proportion of Variance',c(1:10)])
   return(table.tmp)
 }
 
@@ -57,6 +58,17 @@ get_lambda <- function(fit, tol = .5) {
   sd <- fit$cvsd[fit$lambda == fit$lambda.min]
   tolerance <- error + tol*sd
   max(fit$lambda[fit$cvm < tolerance])
+}
+
+#### Function to compute LASSO coefficients #####
+#### Input: input data, subject subset (determined by bootstrapping function)
+#### Output: coefficients
+
+lasso.coef <- function(data, indices) {
+  d <- data[indices,]
+  fit <- glmnet(x = d[,c(3:ncol(d))], y = d[,c(1,2)], 
+                    alpha = 1, family = "cox", lambda = get_lambda(lasso.fit.cv, 0.2), standardize = TRUE)
+  return(coef(fit)[,1])
 }
 
 #### PCA variance plot function #####
@@ -90,26 +102,20 @@ pca_plot <- function(plot.data, title){
 #### Input: loading values for domain in each hemisphere, title
 #### Output: ggplot object
 
-loading_plot <- function(domain.data.lh, domain.data.rh, title){
+loading_plot <- function(domain.data.lh, title){
 
   load_lh <- domain.data.lh$rotation[,1]
   lh_best <- as.data.frame(abs(load_lh[names(sort(abs(load_lh), decreasing = TRUE)[1:10])]))
-  lh_best$area <- rownames(lh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
+  lh_best$area <- rownames(lh_best) %>%   strsplit( '^[^_]*?[_][^_]*?(*SKIP)(*F)|_' , perl=TRUE) %>%   sapply( "[", 1 )
   colnames(lh_best) <- c('Loading', 'Area')
   lh_best$Area <- factor(lh_best$Area, levels = lh_best$Area)
-  
-  load_rh <- domain.data.rh$rotation[,1]
-  rh_best <- as.data.frame(abs(load_rh[names(sort(abs(load_rh), decreasing = TRUE)[1:10])]))
-  rh_best$area <- rownames(rh_best) %>%   strsplit( "_" ) %>%   sapply( "[", 2 )
-  colnames(rh_best) <- c('Loading', 'Area')
-  rh_best$Area <- factor(rh_best$Area, levels = rh_best$Area)
   
   left_loading <- ggplot(lh_best, aes(x=Loading, y=Area))+
     geom_bar(stat="identity", width=0.7, fill="steelblue")+
     theme_minimal() +
     scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
     scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-    ggtitle('Left hemisphere') +
+    ggtitle(title) +
     theme(plot.title = element_text(size = 18, hjust = 0.5),
        axis.title.x = element_text(size = 16),
        axis.title.y = element_text(size = 16),
@@ -118,25 +124,7 @@ loading_plot <- function(domain.data.lh, domain.data.rh, title){
        axis.text.x = element_text(size = 14),
        axis.text.y = element_text(size = 14)) 
   
-  right_loading <- ggplot(rh_best, aes(x=Loading, y=Area))+
-    geom_bar(stat="identity", width=0.7, fill="steelblue")+
-    theme_minimal() +
-    scale_y_discrete(name ="Cortical segments", limits=rev, labels = ) +
-    scale_x_continuous(name="Factor loading onto PC1", breaks = c(0, 0.1, 0.2, 0.3), limits=c(0,0.3)) +
-    ggtitle('Right hemisphere') +
-    theme(plot.title = element_text(size = 18, hjust = 0.5),
-       axis.title.x = element_text(size = 16),
-       axis.title.y = element_text(size = 16),
-       legend.text = element_text(size = 14),
-       legend.title = element_text(size = 16),
-       axis.text.x = element_text(size = 14),
-       axis.text.y = element_text(size = 14)) 
-  
-  plot.loading <- ggarrange(left_loading, right_loading, ncol = 2 )
-  plot.loading <- annotate_figure(plot.loading, top = text_grob(title, 
-                 face = "bold", size = 20))
-  
-  return(plot.loading)
+  return(left_loading)
 }
 
 #### Cox model function #####
@@ -157,16 +145,21 @@ cox_model <- function(cox.bl, i, cox.table, overfit.table, ...){
   # Store overfitting values
   overfit.table[i,] <- c(bl.val['Dxy', 'optimism'], bl.val['R2','optimism'], bl.val['Slope','optimism'])
   
-  if (length(x) > 0){
-    bl.p <- lrtest(x[[1]], bl.conf)
-  
-    cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[10,4], bl.an[3,3],bl.summ[12,4], bl.an[3,3], bl.summ[6,4], bl.an[4,3], bl.summ[8,4], bl.an[5,3], cox.bl$stats['Model L.R.'], bl.p$stats['P'], 1-(x[[2]]/cox.bl$stats['Model L.R.']), bl.val['Dxy', 'index.corrected']/2 + 0.5)
-    
-    return(list(cox.table, overfit.table))
-  }else{
+  if (length(x) == 0){
     # Store regression results
     cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[6,4], bl.an[3,3], bl.summ[8,4], bl.an[3,3], 0, 0, 0, 0, LR.orig, 0, 1, bl.val['Dxy',   'index.corrected']/2 + 0.5)
     return(list(cox.table, overfit.table))
+
+  }else if (nrow(bl.summ) == 10){
+        bl.p <- lrtest(x[[1]], bl.conf)
+  
+    cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[8,4], bl.an[3,3],bl.summ[10,4], bl.an[3,3], bl.summ[6,4], bl.an[4,3],0,0, cox.bl$stats['Model L.R.'], bl.p$stats['P'], 1-(x[[2]]/cox.bl$stats['Model L.R.']), bl.val['Dxy', 'index.corrected']/2 + 0.5)
+        return(list(cox.table, overfit.table))
+  } else {
+        bl.p <- lrtest(x[[1]], bl.conf)
+  
+    cox.table[i,] <- c(bl.summ[2,4], bl.an[1,3], bl.summ[4,4], bl.an[2,3], bl.summ[10,4], bl.an[3,3],bl.summ[12,4], bl.an[3,3], bl.summ[6,4], bl.an[4,3], bl.summ[8,4], bl.an[5,3], cox.bl$stats['Model L.R.'], bl.p$stats['P'], 1-(x[[2]]/cox.bl$stats['Model L.R.']), bl.val['Dxy', 'index.corrected']/2 + 0.5)
+        return(list(cox.table, overfit.table))
   }
   
 }
@@ -175,16 +168,16 @@ cox_model <- function(cox.bl, i, cox.table, overfit.table, ...){
 #### Input: predictors for Cox model, timepoint
 #### Output: ggplot object
 
-calibration_plot <- function(S, timepace, gaf, caarms.cd, caarms.tc, pre.cond, pc1.thick, pc2.thick, t){
+calibration_plot <- function(S, time.to.pace, gaf, caarms.cd, caarms.tc, pre.cond, pc1.thick, pc2.thick, t){
   
   set.seed(123)
 
-  dd <- datadist(timepace, gaf, caarms.cd, caarms.tc, pre.cond, pc1.thick, pc2.thick)
+  dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, pre.cond, pc1.thick, pc2.thick)
   options(datadist='dd')
   
-  bl <- cph(S ~ timepace + gaf + pre.cond , x=TRUE, y=TRUE, surv = TRUE, time.inc = t*12)
-  bl.caarms <- cph(S ~ timepace + gaf + pre.cond  + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = t*12)
-  bl.thick <- cph(S ~ timepace + gaf + pre.cond  + pc1.thick + pc2.thick,  x=TRUE, y=TRUE, surv=TRUE, time.inc = t*12)
+  bl <- cph(S ~ time.to.pace + gaf + pre.cond , x=TRUE, y=TRUE, surv = TRUE, time.inc = t*12)
+  bl.caarms <- cph(S ~ time.to.pace + gaf + pre.cond  + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = t*12)
+  bl.thick <- cph(S ~ time.to.pace + gaf + pre.cond  + pc1.thick + pc2.thick,  x=TRUE, y=TRUE, surv=TRUE, time.inc = t*12)
   
   bl.cal <- calibrate(bl.thick, method = "boot", u= t*12, m=10, B=1000, bw=FALSE)
   bl.caarms.cal <- calibrate(bl.caarms, method = "boot", u= t*12, m=10, B=1000, bw=FALSE)
@@ -192,7 +185,6 @@ calibration_plot <- function(S, timepace, gaf, caarms.cd, caarms.tc, pre.cond, p
   
   
   pred <- as.data.frame(1 - bl.cal[,'pred'])
-  
   colnames(pred) <- c('x')
   
   cal.correct <- as.data.frame(1 - bl.cal[,'calibrated.corrected'])
@@ -223,7 +215,7 @@ calibration_plot <- function(S, timepace, gaf, caarms.cd, caarms.tc, pre.cond, p
          labs(color = '') +
          geom_abline(aes(intercept = 0, slope = 1, color='black'))	+
           scale_color_manual(values = c("black" = "black", "clinical" = "#1b9e77",  "with CAARMS" = "#d95f02", "MRI" = "#7570b3"),
-                             labels = c("ideal",  "base", "base + Cognition", "base + CAARMS subscales")) +
+                             labels = c("ideal",  "base", "base + CAARMS subscales", "base + MRI")) +
          theme(plot.title = element_text(size = 18, hjust = 0.5),
                axis.title.x = element_text(size = 16),
                axis.title.y = element_text(size = 16),
@@ -238,14 +230,14 @@ calibration_plot <- function(S, timepace, gaf, caarms.cd, caarms.tc, pre.cond, p
   
 }
 
-calibration_plot_all <- function(S, timepace, gaf, caarms.cd, caarms.tc, pre.cond){
+calibration_plot_all <- function(S, time.to.pace, gaf, caarms.cd, caarms.tc, pre.cond){
   
   set.seed(123)
 
-  dd <- datadist(timepace, gaf, caarms.cd, caarms.tc, pre.cond)
+  dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, pre.cond)
   options(datadist='dd')
   
-  bl <- cph(S ~ timepace + gaf + pre.cond + caarms.cd + caarms.tc , x=TRUE, y=TRUE, surv = TRUE, time.inc = 2*12)
+  bl <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.cd + caarms.tc , x=TRUE, y=TRUE, surv = TRUE, time.inc = 2*12)
   
   bl.base.cal <- calibrate(bl, method = "boot", u= 2*12, m=10, B=1000, bw=FALSE)
   
@@ -261,7 +253,7 @@ calibration_plot_all <- function(S, timepace, gaf, caarms.cd, caarms.tc, pre.con
   
   for (t in c(4,8,12)){
   
-    bl <- cph(S ~ timepace + gaf + pre.cond + caarms.cd + caarms.tc , x=TRUE, y=TRUE, surv = TRUE, time.inc = t*12)
+    bl <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.cd + caarms.tc , x=TRUE, y=TRUE, surv = TRUE, time.inc = t*12)
     
     bl.base.cal <- calibrate(bl, method = "boot", u= t*12, m=10, B=1000, bw=FALSE)
     
@@ -309,31 +301,29 @@ calibration_plot_all <- function(S, timepace, gaf, caarms.cd, caarms.tc, pre.con
 ```{r, , echo=FALSE}
 #### LOAD DATA #####
 # Load clinical measures
-PACE_bl <- read_excel("path\to\baseline\file")
+PACE_bl <- read_excel("path\to\baseline\data")
 
 # Load follow-up data
-PACE_fup <- read_excel("path\to\follow up data")
+PACE_fup <- read_excel("path\to\follow-up\data")
 # Load MRI Quality Control data
-PACE_MRIQC <- read_excel("path\to\MRI\Quality Control file")
+PACE_MRIQC <- read_excel("path\to\MRI_QC\data")
 # Load look-up table MRI ID and PACE 400 ID
-caseid_MRI <- read_excel("path\to\MRI look up table")
+caseid_MRI <- read_excel("path\to\MRI\data")
 
 # Load MRI thickness data
-PACE_MRIthick <- read.delim("path\to\Freesurfer\thickness\data",header = TRUE, sep = ",")
+PACE_MRIthick <- read.delim("path\to\cortical_thickness\data",header = TRUE, sep = ",")
 # Load MRI curvature data
-PACE_MRIcurve <- read.delim("path\to\Freesurfer\curvature\data",header = TRUE, sep = ",")
+PACE_MRIcurve <- read.delim("path\to\cortical_curvature\data",header = TRUE, sep = ",")
 # Load MRI surface data
-PACE_MRIsurf <- read.delim("path\to\Freesurfer\surface\data",header = TRUE, sep = ",")
+PACE_MRIsurf <- read.delim("path\to\cortical_surface\data",header = TRUE, sep = ",")
 #Load MRI volume data
-PACE_MRIvol <- read.delim("path\to\Freesurfer\volume\data",header = TRUE, sep = ",")
+PACE_MRIvol <- read.delim("path\to\cortical_volume\data",header = TRUE, sep = ",")
 
 # Load neurocognition data
-PACE_Cog <- read_excel("path\to\Freesurfer\cognition\data")
+PACE_Cog <- read_excel("path\to\cognition\data")
 
 # Load brain age values
-load("path\to\Freesurfer\brain age gap\data")
-PACE_brainage <- brain_age_corrected_df
-
+PACE_brainage <- read.delim("path\to\brainage\data",header = TRUE, sep = ",")
 
 #### MERGE TABLES ####
 
@@ -371,17 +361,18 @@ PACE_clinical[PACE_clinical$pre.cond == 4 , c('pre.cond')] <- 3
 #### PREPARE NEUROCOGNITION TABLE ####
 
 # Select neurocognition variables (age adjusted scales for Ward's subtests Arithmetic and Digit Symbol Coding)
-PACE_neurocog <- PACE_Cog[,c('caseid','Ax1CodingASS','Ax1ArithASS')]
+PACE_neurocog <- PACE_Cog[,c('caseid','Ax1CodingASS','Ax1ArithASS', 'Ax1RAVLT_tot3')]
 
 # Remove rows from MRI tables with less than 50%
 PACE_neurocog <- PACE_neurocog[which(rowMeans(!is.na(PACE_neurocog)) > 0.5), ]
 # Set subjects with missing Digit Symbol Coding or Arithmetic scores to NA
 PACE_neurocog[PACE_neurocog$Ax1CodingASS < 0 & !is.na(PACE_neurocog$Ax1CodingASS), 'Ax1CodingASS'] <- NA
 PACE_neurocog[PACE_neurocog$Ax1ArithASS < 0 & !is.na(PACE_neurocog$Ax1ArithASS), 'Ax1ArithASS'] <- NA
+PACE_neurocog[PACE_neurocog$Ax1RAVLT_tot3 < 0 & !is.na(PACE_neurocog$Ax1RAVLT_tot3), 'Ax1RAVLT_tot3'] <- NA
 # Remove subjects with NA values
 PACE_neurocog <- subset(PACE_neurocog, !is.na(Ax1CodingASS))
 PACE_neurocog <- subset(PACE_neurocog, !is.na(Ax1ArithASS))
-
+PACE_neurocog <- subset(PACE_neurocog, !is.na(Ax1RAVLT_tot3))
 # Merge neurocogntion data with clinical data according to PACE 400 ID
 PACE_neurocog <- list(PACE_clinical, PACE_neurocog) %>% reduce(inner_join, by="caseid")
 
@@ -427,6 +418,89 @@ PACE_MRIthick <- merge(PACE_MRI[,c('caseid','MRIsite')], PACE_MRIthick, by.x = '
 PACE_MRIcurve <- merge(PACE_MRI[,c('caseid','MRIsite')], PACE_MRIcurve, by.x = 'caseid')
 PACE_MRIsurf <- merge(PACE_MRI[,c('caseid','MRIsite')], PACE_MRIsurf, by.x = 'caseid')
 PACE_MRIvol <- merge(PACE_MRI[,c('caseid','MRIsite')], PACE_MRIvol, by.x = 'caseid')
+
+```
+
+## Create descriptive table
+
+```{r, echo=FALSE}
+
+PACE_MRI_desc <- PACE_MRI %>% select(caseid, ttmt, sex, age_bl, timepace, vulner, blips, atten, bprst, sanst, gaf, qlst, tc, pa, cd, transtat, fuptime, transdays, sofas, corrected_gap)
+
+PACE_MRI_desc$Ax1ArithASS <- NA
+PACE_MRI_desc$Ax1CodingASS <- NA
+PACE_MRI_desc$Ax1RAVLT_tot3 <- NA
+PACE_MRI_desc$group <- "MRI"
+
+PACE_neurocog_desc <- PACE_neurocog %>% select(caseid, ttmt, sex, age_bl, timepace, vulner, blips, atten, bprst, sanst, gaf, qlst, tc, pa, cd, transtat, fuptime, transdays, sofas, Ax1CodingASS, Ax1ArithASS, Ax1RAVLT_tot3)
+
+PACE_neurocog_desc$corrected_gap <- NA
+PACE_neurocog_desc$group <- "Cognition"
+
+PACE_table <- rbind(PACE_MRI_desc, PACE_neurocog_desc)
+
+# Calculate UHR categories
+PACE_table$uhr_group <- PACE_table$blips + 2*PACE_table$atten + 4*PACE_table$vulner
+
+# Remove subject with no UHR category
+PACE_table <- subset(PACE_table, !is.na(uhr_group))
+
+# Code UHR category according to dominant condition (BLIPS -> Attenuated -> Family History)
+PACE_table[PACE_table$uhr_group == 3 | PACE_table$uhr_group == 5  | PACE_table$uhr_group == 7, c('uhr_group')] <- 1
+PACE_table[PACE_table$uhr_group == 6 , c('uhr_group')] <- 2
+PACE_table[PACE_table$uhr_group == 4 , c('uhr_group')] <- 3
+
+PACE_table$transdays <- PACE_table$transdays * PACE_table$transtat
+
+table_demog <- PACE_table %>% 
+  select(group, ttmt, sex, age_bl, timepace, uhr_group, bprst, sanst, gaf, qlst, tc, pa, cd, transtat, fuptime, transdays, sofas, Ax1CodingASS, Ax1ArithASS, Ax1RAVLT_tot3, corrected_gap ) %>% # keep only columns of interest
+  mutate(
+    ttmt = factor(ttmt, labels = c("Intervention", "Standard")), 
+    transtat = factor(transtat, labels = c("No Transition", "Transition")), 
+    sex = factor(sex, labels = c("Male", "Female")),
+    uhr_group = factor(uhr_group, labels = c("any BLIPS", "APS or APS+Trait", "Trait"))
+  ) %>% 
+  tbl_summary(     
+    by = group,                                               # stratify entire table by outcome
+    statistic = list(all_continuous() ~ "{mean}+/-{sd} ({N_nonmiss})",        # stats and format for continuous columns
+                     all_categorical() ~ "{p}% ({n}/{N}) "),   # stats and format for categorical columns
+    digits = all_continuous() ~ 1,                              # rounding for continuous columns
+    type   = list(c(ttmt, transtat, sex) ~ "dichotomous",
+                  c(age_bl, timepace, bprst, sanst, gaf, qlst, tc, pa, cd, fuptime, transdays, sofas, Ax1CodingASS, Ax1ArithASS, Ax1RAVLT_tot3, corrected_gap) ~ "continuous",
+                  c(uhr_group) ~ "categorical"),
+    value = list(sex ~ "Female",
+                 transtat ~ "Transition",
+                 ttmt ~ "Intervention"),
+    label  = list(                                              # display labels for column names
+      age_bl ~ "Age at baseline (years)",
+      sex ~ "Gender",
+      ttmt ~ "Treatment",
+      uhr_group ~ "UHR subgroup",
+      timepace ~ "Time between symptom onset and first contact with PACE (days)",
+      tc ~ "CAARMS Disorders of Thought Content, severity",
+      pa ~ "CAARMS Perceptual Abnormalities, severity",
+      cd ~ "CAARMS Conceptual Disorganisation, severity",
+      bprst ~ "BPRS Total",
+      sanst ~ "SANS Total",
+      gaf ~ "GAF",
+      qlst ~ "QLS Total",
+      Ax1CodingASS ~ "Coding",
+      Ax1ArithASS ~ "Arithmetic",
+      Ax1RAVLT_tot3 ~ "RAVLT total",
+      corrected_gap ~ "Brain Age Gap",
+      transtat ~ "Transition status",
+      transdays ~ "Time to transition (days)",
+      fuptime ~ "Follow-up time (days)",
+      sofas ~ "SOFAS at follow-up"
+    ),
+    missing = "no", # don't list missing data separately;
+  ) %>%
+  modify_header(label = "Variable") %>% # update the column header
+  bold_labels()
+
+table_demog %>%
+  as_flex_table() %>%
+  flextable::save_as_docx(path = "U:/PostDoc/Research/Publications/Own/PACE_400_Cox/demog_table.docx")
 
 ```
 
@@ -478,20 +552,18 @@ Each structural map contains 34 variables each linked to a region of the brain. 
 
 # Split each domain in left and right hemisphere
 PACE_MRIthick.caseid <- PACE_MRIthick$caseid
-PACE_MRIthick.lh <- PACE_MRIthick[,c(2,4:(ceiling(ncol(PACE_MRIthick)/2)))]
-PACE_MRIthick.rh <- PACE_MRIthick[,c(2,(ceiling(ncol(PACE_MRIthick)/2)+2):(ncol(PACE_MRIthick)-1))]
+PACE_MRIthick.bl <- PACE_MRIthick[,c(2,4:(ncol(PACE_MRIthick)-1))]
+PACE_MRIthick.bl <- subset(PACE_MRIthick.bl, select = -c(lh_MeanThickness_thickness))
 
 PACE_MRIcurve.caseid <- PACE_MRIcurve$caseid
-PACE_MRIcurve.lh <- PACE_MRIcurve[,c(2,4:(ceiling(ncol(PACE_MRIcurve)/2)+1))]
-PACE_MRIcurve.rh <- PACE_MRIcurve[,c(2,(ceiling(ncol(PACE_MRIcurve)/2)+2):(ncol(PACE_MRIcurve)))]
+PACE_MRIcurve.bl <- PACE_MRIcurve[,c(2,4:ncol(PACE_MRIcurve))]
 
 PACE_MRIsurf.caseid <- PACE_MRIsurf$caseid
-PACE_MRIsurf.lh <- PACE_MRIsurf[,c(2, 4:(ceiling(ncol(PACE_MRIsurf)/2)))]
-PACE_MRIsurf.rh <- PACE_MRIsurf[,c(2, (ceiling(ncol(PACE_MRIsurf)/2)+2):(ncol(PACE_MRIsurf)-1))]
+PACE_MRIsurf.bl <- PACE_MRIsurf[,c(2,4:(ncol(PACE_MRIsurf)-1))]
+PACE_MRIsurf.bl <- subset(PACE_MRIsurf.bl, select = -c(lh_WhiteSurfArea_area))
 
 PACE_MRIvol.caseid <- PACE_MRIvol$caseid
-PACE_MRIvol.lh <- PACE_MRIvol[,c(2, 4:(ceiling(ncol(PACE_MRIvol)/2)+1))]
-PACE_MRIvol.rh <- PACE_MRIvol[,c(2, (ceiling(ncol(PACE_MRIvol)/2)+2):(ncol(PACE_MRIvol)))]
+PACE_MRIvol.bl <- PACE_MRIvol[,c(2,4:ncol(PACE_MRIvol))]
 
 ```
 
@@ -500,121 +572,57 @@ Harmonize MRI data based on scanner site
 ```{r, echo=FALSE}
 
 # Split each domain in left and right hemisphere
-PACE_MRIthick.lh.harm <- ComBat(t(PACE_MRIthick.lh[,c(2:ncol(PACE_MRIthick.lh))]), PACE_MRIthick.lh$MRIsite, mod = PACE_MRI$transtat)
-PACE_MRIthick.lh.harm <- as.data.frame(t(PACE_MRIthick.lh.harm))
-PACE_MRIthick.rh.harm <- ComBat(t(PACE_MRIthick.rh[,c(2:ncol(PACE_MRIthick.rh))]), PACE_MRIthick.rh$MRIsite,  mod = PACE_MRI$transtat)
-PACE_MRIthick.rh.harm <- as.data.frame(t(PACE_MRIthick.rh.harm))
+PACE_MRIthick.bl.harm <- ComBat(t(PACE_MRIthick.bl[,c(2:ncol(PACE_MRIthick.bl))]), PACE_MRIthick.bl$MRIsite, mod = PACE_MRI$transtat)
+PACE_MRIthick.bl.harm <- as.data.frame(t(PACE_MRIthick.bl.harm))
 
-PACE_MRIcurve.lh.harm <- ComBat(t(PACE_MRIcurve.lh[,c(2:ncol(PACE_MRIcurve.lh))]), PACE_MRIcurve.lh$MRIsite,  mod = PACE_MRI$transtat)
-PACE_MRIcurve.lh.harm <- as.data.frame(t(PACE_MRIcurve.lh.harm))
-PACE_MRIcurve.rh.harm <- ComBat(t(PACE_MRIcurve.rh[,c(2:ncol(PACE_MRIcurve.rh))]), PACE_MRIcurve.rh$MRIsite,  mod = PACE_MRI$transtat)
-PACE_MRIcurve.rh.harm <- as.data.frame(t(PACE_MRIcurve.rh.harm))
+PACE_MRIcurve.bl.harm <- ComBat(t(PACE_MRIcurve.bl[,c(2:ncol(PACE_MRIcurve.bl))]), PACE_MRIcurve.bl$MRIsite, mod = PACE_MRI$transtat)
+PACE_MRIcurve.bl.harm <- as.data.frame(t(PACE_MRIcurve.bl.harm))
 
-PACE_MRIsurf.lh.harm <- ComBat(t(PACE_MRIsurf.lh[,c(2:ncol(PACE_MRIsurf.lh))]), PACE_MRIsurf.lh$MRIsite,  mod = PACE_MRI$transtat)
-PACE_MRIsurf.lh.harm <- as.data.frame(t(PACE_MRIsurf.lh.harm))
-PACE_MRIsurf.rh.harm <- ComBat(t(PACE_MRIsurf.rh[,c(2:ncol(PACE_MRIsurf.rh))]), PACE_MRIsurf.rh$MRIsite,  mod = PACE_MRI$transtat)
-PACE_MRIsurf.rh.harm <- as.data.frame(t(PACE_MRIsurf.rh.harm))
+PACE_MRIsurf.bl.harm <- ComBat(t(PACE_MRIsurf.bl[,c(2:ncol(PACE_MRIsurf.bl))]), PACE_MRIsurf.bl$MRIsite, mod = PACE_MRI$transtat)
+PACE_MRIsurf.bl.harm <- as.data.frame(t(PACE_MRIsurf.bl.harm))
 
-PACE_MRIvol.lh.harm <- ComBat(t(PACE_MRIvol.lh[,c(2:ncol(PACE_MRIvol.lh))]), PACE_MRIvol.lh$MRIsite,  mod = PACE_MRI$transtat)
-PACE_MRIvol.lh.harm <- as.data.frame(t(PACE_MRIvol.lh.harm))
-PACE_MRIvol.rh.harm <- ComBat(t(PACE_MRIvol.rh[,c(2:ncol(PACE_MRIvol.rh))]), PACE_MRIvol.rh$MRIsite,  mod = PACE_MRI$transtat)
-PACE_MRIvol.rh.harm <- as.data.frame(t(PACE_MRIvol.rh.harm))
+PACE_MRIvol.bl.harm <- ComBat(t(PACE_MRIvol.bl[,c(2:ncol(PACE_MRIvol.bl))]), PACE_MRIvol.bl$MRIsite, mod = PACE_MRI$transtat)
+PACE_MRIvol.bl.harm <- as.data.frame(t(PACE_MRIvol.bl.harm))
 
 ```
 
 
-
-Calculate PCA values and select only the first component for each hemisphere
+Calculate PCA values with harmonized data and select first two components bilaterally
 
 ```{r, echo=FALSE}
 
 #### Calculate PCA for each domain and hemisphere ####
 
 # Thickness
-PACE_MRIthick.pcalh <- prcomp(PACE_MRIthick.lh[, c(2:ncol(PACE_MRIthick.lh))], center = TRUE,scale. = TRUE, rank.=10)
-PACE_MRIthick.pcarh <- prcomp(PACE_MRIthick.rh[, c(2:ncol(PACE_MRIthick.rh))], center = TRUE,scale. = TRUE, rank.=10)
+PACE_MRIthick.pcabl.harm <- prcomp(PACE_MRIthick.bl.harm, center = TRUE,scale. = TRUE, rank.=10)
 # Select the first thickness PCA for each hemisphere
-MRI.thick <- as.data.frame(cbind(PACE_MRIthick.caseid, PACE_MRIthick.pcalh$x[,'PC1'], PACE_MRIthick.pcarh$x[,'PC1']))
+MRI.thick <- as.data.frame(cbind(PACE_MRIthick.caseid, PACE_MRIthick.pcabl.harm$x[,'PC1'], PACE_MRIthick.pcabl.harm$x[,'PC2']))
 # Rename selected PCAs
-colnames(MRI.thick) <- c('caseid', 'thickness_lh', 'thickness_rh')
+colnames(MRI.thick) <- c('caseid', 'thickness_bl_harm1', 'thickness_bl_harm2')
 
 
 # Volume
-PACE_MRIvol.pcalh <- prcomp(PACE_MRIvol.lh[, c(2:ncol(PACE_MRIvol.lh))], center = TRUE,scale. = TRUE, rank.=10)
-PACE_MRIvol.pcarh <- prcomp(PACE_MRIvol.rh[, c(2:ncol(PACE_MRIvol.rh))], center = TRUE,scale. = TRUE, rank.=10)
+PACE_MRIvol.pcabl.harm  <- prcomp(PACE_MRIvol.bl.harm, center = TRUE,scale. = TRUE, rank.=10)
 # Select the first volume PCA for each hemisphere
-MRI.vol <- as.data.frame(cbind(PACE_MRIvol.caseid, PACE_MRIvol.pcalh$x[,'PC1'], PACE_MRIvol.pcarh$x[,'PC1']))
+MRI.vol <- as.data.frame(cbind(PACE_MRIvol.caseid, PACE_MRIvol.pcabl.harm$x[,'PC1'], PACE_MRIvol.pcabl.harm$x[,'PC2']))
 # Rename selected PCAs
-colnames(MRI.vol) <- c('caseid', 'volume_lh', 'volume_rh')
+colnames(MRI.vol) <- c('caseid', 'volume_bl_harm1', 'volume_bl_harm2')
 
 
 # Surface area
-PACE_MRIsurf.pcalh <- prcomp(PACE_MRIsurf.lh[, c(2:ncol(PACE_MRIsurf.lh))], center = TRUE,scale. = TRUE, rank.=10)
-PACE_MRIsurf.pcarh <- prcomp(PACE_MRIsurf.rh[, c(2:ncol(PACE_MRIsurf.rh))], center = TRUE,scale. = TRUE, rank.=10)
+PACE_MRIsurf.pcabl.harm  <- prcomp(PACE_MRIsurf.bl.harm, center = TRUE,scale. = TRUE, rank.=10)
 # Select the first surface area PCA for each hemisphere
-MRI.surf <- as.data.frame(cbind(PACE_MRIsurf.caseid, PACE_MRIsurf.pcalh$x[,'PC1'], PACE_MRIsurf.pcarh$x[,'PC1']))
+MRI.surf <- as.data.frame(cbind(PACE_MRIsurf.caseid, PACE_MRIsurf.pcabl.harm$x[,'PC1'], PACE_MRIsurf.pcabl.harm$x[,'PC2']))
 # Rename selected PCAs
-colnames(MRI.surf) <- c('caseid', 'surface_lh', 'surface_rh')
+colnames(MRI.surf) <- c('caseid', 'surface_bl_harm1', 'surface_bl_harm2')
 
 
 # Curvature
-PACE_MRIcurve.pcalh <- prcomp(PACE_MRIcurve.lh[, c(2:ncol(PACE_MRIcurve.lh))], center = TRUE,scale. = TRUE, rank.=10)
-PACE_MRIcurve.pcarh <- prcomp(PACE_MRIcurve.rh[, c(2:ncol(PACE_MRIcurve.rh))], center = TRUE,scale. = TRUE, rank.=10)
+PACE_MRIcurve.pcabl.harm  <- prcomp(PACE_MRIcurve.bl.harm, center = TRUE,scale. = TRUE, rank.=10)
 # Select the first curvature PCA for each hemisphere
-MRI.curve <- as.data.frame(cbind(PACE_MRIcurve.caseid, PACE_MRIcurve.pcalh$x[,'PC1'], PACE_MRIcurve.pcarh$x[,'PC1']))
+MRI.curve <- as.data.frame(cbind(PACE_MRIcurve.caseid, PACE_MRIcurve.pcabl.harm$x[,'PC1'], PACE_MRIcurve.pcabl.harm$x[,'PC2']))
 # Rename selected PCAs
-colnames(MRI.curve) <- c('caseid', 'curvature_lh', 'curvature_rh')
-
-# Merge all selected MRI principal components
-MRI.all <- merge(MRI.thick, MRI.vol, by.x = "caseid", by.y = "caseid")
-MRI.all <- merge(MRI.all, MRI.curve, by.x = "caseid", by.y = "caseid")
-MRI.all <- merge(MRI.all, MRI.surf, by.x = "caseid", by.y = "caseid")
-
-# Merge MRI commponents with PACE data
-PACE_MRI <- merge(PACE_MRI, MRI.all, by.x = "caseid", by.y = "caseid")
-```
-
-
-Calculate PCA values with harmonized data and select only the first component for each hemisphere
-
-```{r, echo=FALSE}
-
-#### Calculate PCA for each domain and hemisphere ####
-
-# Thickness
-PACE_MRIthick.pcalh.harm <- prcomp(PACE_MRIthick.lh.harm, center = TRUE,scale. = TRUE, rank.=10)
-PACE_MRIthick.pcarh.harm <- prcomp(PACE_MRIthick.rh.harm, center = TRUE,scale. = TRUE, rank.=10)
-# Select the first thickness PCA for each hemisphere
-MRI.thick <- as.data.frame(cbind(PACE_MRIthick.caseid, PACE_MRIthick.pcalh.harm$x[,'PC1'], PACE_MRIthick.pcarh.harm$x[,'PC1']))
-# Rename selected PCAs
-colnames(MRI.thick) <- c('caseid', 'thickness_lh_harm', 'thickness_rh_harm')
-
-
-# Volume
-PACE_MRIvol.pcalh.harm  <- prcomp(PACE_MRIvol.lh.harm, center = TRUE,scale. = TRUE, rank.=10)
-PACE_MRIvol.pcarh.harm  <- prcomp(PACE_MRIvol.rh.harm, center = TRUE,scale. = TRUE, rank.=10)
-# Select the first volume PCA for each hemisphere
-MRI.vol <- as.data.frame(cbind(PACE_MRIvol.caseid, PACE_MRIvol.pcalh.harm$x[,'PC1'], PACE_MRIvol.pcarh.harm$x[,'PC1']))
-# Rename selected PCAs
-colnames(MRI.vol) <- c('caseid', 'volume_lh_harm', 'volume_rh_harm')
-
-
-# Surface area
-PACE_MRIsurf.pcalh.harm  <- prcomp(PACE_MRIsurf.lh.harm, center = TRUE,scale. = TRUE, rank.=10)
-PACE_MRIsurf.pcarh.harm  <- prcomp(PACE_MRIsurf.rh.harm, center = TRUE,scale. = TRUE, rank.=10)
-# Select the first surface area PCA for each hemisphere
-MRI.surf <- as.data.frame(cbind(PACE_MRIsurf.caseid, PACE_MRIsurf.pcalh.harm$x[,'PC1'], PACE_MRIsurf.pcarh.harm$x[,'PC1']))
-# Rename selected PCAs
-colnames(MRI.surf) <- c('caseid', 'surface_lh_harm', 'surface_rh_harm')
-
-
-# Curvature
-PACE_MRIcurve.pcalh.harm  <- prcomp(PACE_MRIcurve.lh.harm, center = TRUE,scale. = TRUE, rank.=10)
-PACE_MRIcurve.pcarh.harm  <- prcomp(PACE_MRIcurve.rh.harm, center = TRUE,scale. = TRUE, rank.=10)
-# Select the first curvature PCA for each hemisphere
-MRI.curve <- as.data.frame(cbind(PACE_MRIcurve.caseid, PACE_MRIcurve.pcalh.harm$x[,'PC1'], PACE_MRIcurve.pcarh.harm$x[,'PC1']))
-# Rename selected PCAs
-colnames(MRI.curve) <- c('caseid', 'curvature_lh_harm', 'curvature_rh_harm')
+colnames(MRI.curve) <- c('caseid', 'curvature_bl_harm1', 'curvature_bl_harm2')
 
 # Merge all selected MRI principal components
 MRI.all <- merge(MRI.thick, MRI.vol, by.x = "caseid", by.y = "caseid")
@@ -628,29 +636,18 @@ PACE_MRI <- merge(PACE_MRI, MRI.all, by.x = "caseid", by.y = "caseid")
 Create PCA table
 
 ```{r, echo=FALSE}
+
 pc <- data.frame(Thickness=double(),
                  Volume=double(), 
                  Surface=double(), 
                  Curve=double()) 
 
-pc <- pca.table(pc, 1, PACE_MRIthick.pcalh, PACE_MRIthick.pcarh)
-pc <- pca.table(pc, 4, PACE_MRIcurve.pcalh, PACE_MRIcurve.pcarh)
-pc <- pca.table(pc, 2, PACE_MRIvol.pcalh, PACE_MRIvol.pcarh)
-pc <- pca.table(pc, 3, PACE_MRIsurf.pcalh, PACE_MRIsurf.pcarh)
+pc <- pca.table(pc, 1, PACE_MRIthick.pcabl.harm)
+pc <- pca.table(pc, 4, PACE_MRIcurve.pcabl.harm)
+pc <- pca.table(pc, 2, PACE_MRIvol.pcabl.harm)
+pc <- pca.table(pc, 3, PACE_MRIsurf.pcabl.harm)
 pc <- round(pc, 2)
-row.names(pc) <- c(paste('PC', c(1:10), 'lh', sep=''), paste('PC', c(1:10), 'rh', sep=''))
-
-pc2 <- data.frame(Thickness=double(),
-                 Volume=double(), 
-                 Surface=double(), 
-                 Curve=double()) 
-
-pc2 <- pca.table(pc2, 1, PACE_MRIthick.pcalh.harm, PACE_MRIthick.pcarh.harm)
-pc2 <- pca.table(pc2, 4, PACE_MRIcurve.pcalh, PACE_MRIcurve.pcarh.harm)
-pc2 <- pca.table(pc2, 2, PACE_MRIvol.pcalh.harm, PACE_MRIvol.pcarh.harm)
-pc2 <- pca.table(pc2, 3, PACE_MRIsurf.pcalh.harm, PACE_MRIsurf.pcarh.harm)
-pc2 <- round(pc2, 2)
-row.names(pc2) <- c(paste('PC', c(1:10), 'lh', sep=''), paste('PC', c(1:10), 'rh', sep=''))
+row.names(pc) <- c(paste('PC', c(1:10), sep=''))
 
 ```
 
@@ -658,16 +655,11 @@ Show PCA table
 
 ```{r, echo=FALSE,  fig.height = 8, fig.width = 8, fig.align = "center"}
 pc %>%
-  kbl(caption = "Table 1: Proportion of variance [%] included in first 10 principal components of each hemisphere and structural map") %>%
+  kbl(caption = "Table 1: Proportion of variance [%] included in first 10 principal components of each structural map") %>%
   kable_classic(full_width = F, html_font = "Cambria") %>%
-  pack_rows("Left hemisphere", 1, 10) %>%
-  pack_rows("Right hemisphere", 11, 20)
+  pack_rows("Bilateral", 1, 10)
 
-pc2 %>%
-  kbl(caption = "Table 1: Proportion of variance [%] included in first 10 principal components of each hemisphere and structural map") %>%
-  kable_classic(full_width = F, html_font = "Cambria") %>%
-  pack_rows("Left hemisphere", 1, 10) %>%
-  pack_rows("Right hemisphere", 11, 20)
+
 ```
 
 
@@ -675,50 +667,57 @@ Boxplots of principal components categorised by MRI site
 
 ```{r, echo=FALSE,  fig.height = 8, fig.width = 8, fig.align = "center"}
 
-plot_thickness <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=thickness_lh, fill=as.factor(transtat)))+
+# plot_thickness <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=thickness_bl, fill=as.factor(transtat)))+
+#   geom_boxplot() +
+#   labs(fill='Transition status') + 
+#   ggtitle("Original values") +
+#   scale_y_continuous(breaks=c(seq(-10,10,1)), limits = c(-10, 10))+
+#   labs(x="MRI site", y="Thickness left hemisphere PCA score") +
+#   scale_x_discrete(labels=c("RCH","RMH", "BRI")) +
+#   scale_fill_brewer(labels=c('No Transition', 'Transition'), palette="Dark2") + 
+#   theme_minimal() +
+#   theme(plot.title = element_text(size=15, hjust = 0.5),
+#         axis.text.x = element_text(size = 10),
+#         axis.title.x = element_text(size = 15),
+#         axis.text.y = element_text(size = 10),
+#         axis.title.y = element_text(size =15),
+#         legend.text = element_text(size = 10),
+#         legend.title = element_text(size = 10)) 
+# 
+# plot_thickness_harm <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=thickness_bl_harm1, fill=as.factor(transtat)))+
+#   geom_boxplot() +
+#   labs(fill='Transition status') + 
+#   ggtitle("Harmonized values") +
+#   scale_y_continuous(breaks=c(seq(-10,10,1)), limits = c(-10, 10))+
+#   labs(x="MRI site", y="Thickness left hemisphere PCA score") +
+#   scale_x_discrete(labels=c("RCH","RMH", "BRI")) +
+#   scale_fill_brewer(labels=c('No Transition', 'Transition'), palette="Dark2") + 
+#   theme_minimal() +
+#   theme(plot.title = element_text(size=15, hjust = 0.5),
+#         axis.text.x = element_text(size = 10),
+#         axis.title.x = element_text(size = 15),
+#         axis.text.y = element_text(size = 10),
+#         axis.title.y = element_text(size = 15),
+#         legend.text = element_text(size = 10),
+#         legend.title = element_text(size = 10)) 
+# 
+# plot_thickness
+# plot_thickness_harm
+# 
+# ggarrange(plot_thickness, plot_thickness_harm, ncol = 2, legend = "bottom", common.legend = TRUE)
+
+
+PACE_MRIthick.bl.harm$MRIsite <- PACE_MRIthick$MRIsite
+PACE_MRIthick.bl.harm$transtat <-   PACE_MRI$transtat
+
+plot_thickness2 <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=rh_rostralmiddlefrontal_thickness, fill=as.factor(transtat)))+
   geom_boxplot() +
   labs(fill='Transition status') + 
   ggtitle("Original values") +
-  scale_y_continuous(breaks=c(seq(-10,10,1)), limits = c(-10, 10))+
-  labs(x="MRI site", y="Thickness left hemisphere PCA score") +
+  scale_y_continuous(breaks=c(seq(-10,10,1)), limits = c(2, 3.5))+
+  labs(x="MRI site", y="Thickness right rostralmiddlefrontal") +
   scale_x_discrete(labels=c("RCH","RMH", "BRI")) +
   scale_fill_brewer(labels=c('No Transition', 'Transition'), palette="Dark2") + 
-  theme_minimal() +
-  theme(plot.title = element_text(size=15, hjust = 0.5),
-        axis.text.x = element_text(size = 10),
-        axis.title.x = element_text(size = 15),
-        axis.text.y = element_text(size = 10),
-        axis.title.y = element_text(size =15),
-        legend.text = element_text(size = 10),
-        legend.title = element_text(size = 10)) 
-
-plot_thickness_harm <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=thickness_lh_harm, fill=as.factor(transtat)))+
-  geom_boxplot() +
-  labs(fill='Transition status') + 
-  ggtitle("Harmonized values") +
-  scale_y_continuous(breaks=c(seq(-10,10,1)), limits = c(-10, 10))+
-  labs(x="MRI site", y="Thickness left hemisphere PCA score") +
-  scale_x_discrete(labels=c("RCH","RMH", "BRI")) +
-  scale_fill_brewer(labels=c('No Transition', 'Transition'), palette="Dark2") + 
-  theme_minimal() +
-  theme(plot.title = element_text(size=15, hjust = 0.5),
-        axis.text.x = element_text(size = 10),
-        axis.title.x = element_text(size = 15),
-        axis.text.y = element_text(size = 10),
-        axis.title.y = element_text(size = 15),
-        legend.text = element_text(size = 10),
-        legend.title = element_text(size = 10)) 
-
-ggarrange(plot_thickness, plot_thickness_harm, ncol = 2, legend = "bottom", common.legend = TRUE)
-
-plot_thickness2 <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=lh_rostralmiddlefrontal_thickness, fill=as.factor(transtat)))+
-  geom_boxplot() +
-  labs(fill='Transition status') + 
-  ggtitle("Left hemisphere") +
-  scale_y_continuous(breaks=c(seq(-10,10,1)), limits = c(2, 4))+
-  labs(x="MRI site", y="Thickness rostralmiddlefrontal") +
-  scale_x_discrete(labels=c("RCH","RMH","RCH (Orig 1.5)", "BRI")) +
-  scale_fill_brewer(palette="Dark2") + 
   theme_minimal() +
   theme(plot.title = element_text(size=10, hjust = 0.5),
         axis.text.x = element_text(size = 10),
@@ -728,14 +727,14 @@ plot_thickness2 <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=lh_rostralmiddlefro
         legend.text = element_text(size = 10),
         legend.title = element_text(size = 10)) 
 
-plot_thickness_harm2 <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=rh_rostralmiddlefrontal_thickness, fill=as.factor(transtat)))+
+plot_thickness_harm2 <- ggplot(PACE_MRIthick.bl.harm, aes(x=factor(MRIsite), y=rh_rostralmiddlefrontal_thickness, fill=as.factor(transtat)))+
   geom_boxplot() +
+  ggtitle("Harmonized values") +
   labs(fill='Transition status') + 
-  ggtitle("Right hemisphere") +
-  scale_y_continuous(breaks=c(seq(-10,10,1)), limits = c(2, 4))+
-  labs(x="MRI site", y="Thickness rostralmiddlefrontal") +
-  scale_x_discrete(labels=c("RCH","RMH","RCH (Orig 1.5)", "BRI")) +
-  scale_fill_brewer(palette="Dark2") + 
+  scale_y_continuous(breaks=c(seq(-10,10,1)), limits = c(2, 3.5))+
+  labs(x="MRI site", y="Thickness right rostralmiddlefrontal") +
+  scale_x_discrete(labels=c("RCH","RMH","BRI")) +
+  scale_fill_brewer(labels=c('No Transition', 'Transition'), palette="Dark2") + 
   theme_minimal() +
   theme(plot.title = element_text(size=10, hjust = 0.5),
         axis.text.x = element_text(size = 10),
@@ -748,21 +747,6 @@ plot_thickness_harm2 <- ggplot(PACE_MRI, aes(x=factor(MRIsite), y=rh_rostralmidd
 
 ggarrange(plot_thickness2, plot_thickness_harm2, ncol = 2, legend = "bottom", common.legend = TRUE)
 
-plot_thickness_scatter <- ggplot(PACE_MRI, aes(x=lh_rostralmiddlefrontal_thickness, y=rh_rostralmiddlefrontal_thickness, color=as.factor(MRIsite), shape = as.factor(MRIsite)))+
-  geom_point() +
-  ggtitle("Right hemisphere") +
-  scale_y_continuous(breaks=c(seq(2,4,1)), limits = c(2, 4))+
-  scale_x_continuous(breaks=c(seq(2,4,1)), limits = c(2, 4))+
-  labs(x="MRI site", y="Thickness rostralmiddlefrontal") +
-  scale_fill_brewer(palette="Dark2") + 
-  theme_minimal() +
-  theme(plot.title = element_text(size=10, hjust = 0.5),
-        axis.text.x = element_text(size = 10),
-        axis.title.x = element_text(size = 15),
-        axis.text.y = element_text(size = 10),
-        axis.title.y = element_text(size = 15),
-        legend.text = element_text(size = 10),
-        legend.title = element_text(size = 10)) 
 ```
 
 
@@ -770,31 +754,84 @@ plot_thickness_scatter <- ggplot(PACE_MRI, aes(x=lh_rostralmiddlefrontal_thickne
 
 ```{r, echo=FALSE}
 
-pc_left <- pc[1:10,]*100
-pc_left$x <- 1:10
-pc_left_plot <- melt(pc_left, id.vars = "x")
-pc_right <- pc[11:20,]*100
-pc_right$x <- 1:10
-pc_right_plot <- melt(pc_right, id.vars = "x")
+pc_bl <- pc[1:10,]*100
+pc_bl$x <- 1:10
+pc_bl_plot <- melt(pc_bl, id.vars = "x")
 
-pca_left_plot <- pca_plot(pc_left_plot, 'Left hemisphere')
-pca_right_plot <- pca_plot(pc_right_plot, 'Right hemisphere')
-
-ggarrange(pca_left_plot, pca_right_plot, ncol = 2, common.legend = TRUE, legend = "bottom")
-
+pca_left_plot <- pca_plot(pc_bl_plot, 'Bilateral')
+pca_left_plot
 
 # Thickness loading
 
-thick.loading <- loading_plot(PACE_MRIthick.pcalh, PACE_MRIthick.pcarh, 'Thickness')
-vol.loading <- loading_plot(PACE_MRIvol.pcalh, PACE_MRIvol.pcarh, 'Volume')
-curve.loading <- loading_plot(PACE_MRIcurve.pcalh, PACE_MRIcurve.pcarh, 'Mean curvature')
-surf.loading <- loading_plot(PACE_MRIsurf.pcalh, PACE_MRIsurf.pcarh, 'Area')
+thick.loading <- loading_plot(PACE_MRIthick.pcabl.harm, 'Thickness')
+vol.loading <- loading_plot(PACE_MRIvol.pcabl.harm,  'Volume')
+curve.loading <- loading_plot(PACE_MRIcurve.pcabl.harm, 'Mean curvature')
+surf.loading <- loading_plot(PACE_MRIsurf.pcabl.harm,  'Area')
 
-ggarrange(thick.loading, vol.loading, curve.loading, surf.loading, nrow = 4)
+ggarrange(thick.loading, vol.loading, curve.loading, surf.loading, ncol = 2, nrow = 2)
 
 ```
 
 ## Cox regression analysis
+
+```{r, include=FALSE}
+
+PACE_MRI[,names(PACE_MRIthick.bl.harm)] <- PACE_MRIthick.bl.harm
+
+PACE_MRI[,names(PACE_MRIcurve.bl.harm)] <- PACE_MRIcurve.bl.harm
+
+PACE_MRI[,names(PACE_MRIsurf.bl.harm)] <- PACE_MRIsurf.bl.harm
+
+PACE_MRI[,names(PACE_MRIvol.bl.harm)] <- PACE_MRIvol.bl.harm
+```
+
+
+
+```{r, include=FALSE}
+
+# Calculate time to event and event status
+dtime <- PACE_MRI$transmonths
+event <- PACE_MRI$transtat
+
+
+# Preparation for imputation
+w <- transcan(~ timepace + gaf + cd + tc + ttmt + pre.cond + surface_bl_harm1 + surface_bl_harm2 + thickness_bl_harm1 + thickness_bl_harm2 + volume_bl_harm1 + volume_bl_harm2 + curvature_bl_harm1 + curvature_bl_harm2 + lh_paracentral_thickness + rh_paracentral_thickness + rh_superiortemporal_thickness + lh_fusiform_thickness  + corrected_gap + age_bl, imputed=TRUE, data = PACE_MRI, pl=FALSE, pr = FALSE)
+
+# create variables out of columns
+attach(PACE_MRI)
+
+# Imputation (theoretically not needed)
+time.to.pace <- log(impute(w, timepace, data = PACE_MRI))
+gaf <- impute(w, gaf, data = PACE_MRI)
+caarms.tc <- impute(w, tc, data = PACE_MRI)
+caarms.cd <- impute(w, cd, data = PACE_MRI)
+ttmt <- impute(w, ttmt, data = PACE_MRI)
+pre.cond <- impute(w, pre.cond, data = PACE_MRI)
+pre.cond <- relevel(factor(pre.cond),ref='3')
+pc1.surf <- impute(w, surface_bl_harm1, data = PACE_MRI)
+pc2.surf <- impute(w, surface_bl_harm2, data = PACE_MRI)
+pc1.thick <- impute(w, thickness_bl_harm1, data = PACE_MRI)
+pc2.thick <- impute(w, thickness_bl_harm2, data = PACE_MRI)
+pc1.vol <- impute(w, volume_bl_harm1, data = PACE_MRI)
+pc2.vol <- impute(w, volume_bl_harm2, data = PACE_MRI)
+pc1.curve <- impute(w, curvature_bl_harm1, data = PACE_MRI)
+pc2.curve <- impute(w, curvature_bl_harm2, data = PACE_MRI)
+para_left <- impute(w, lh_paracentral_thickness, data = PACE_MRI)
+para_right <- impute(w, rh_paracentral_thickness, data = PACE_MRI)
+superior_right <- impute(w, lh_fusiform_thickness, data = PACE_MRI)
+fusi_left <- impute(w, curvature_bl_harm2, data = PACE_MRI)
+brain_age <- impute(w, corrected_gap, data = PACE_MRI)
+age <- impute(w, age_bl, data = PACE_MRI)
+# Preperation for cox model fit
+dd <- datadist(time.to.pace, gaf, caarms.cd, caarms.tc, ttmt, pre.cond, pc1.surf, pc2.surf, pc1.thick, pc2.thick, pc1.vol, pc2.vol, pc1.curve, pc2.curve, para_left, para_right, superior_right, fusi_left, brain_age, age)
+options(datadist='dd')
+units(dtime) <- 'Month'
+
+# Define Surv model
+S <- Surv(dtime, event)
+
+
+```
 
 Cox model using clinical variables
 
@@ -823,35 +860,42 @@ overfit.table <- data.frame(delta_Dxy=double(),
                  delta_R2=double(), 
                  delta_slope=double())
 
-dd <- datadist(PACE_MRI)
-options(datadist='dd')
-
-PACE_MRI$pre.cond <- relevel(as.factor(PACE_MRI$pre.cond),ref = 1)
-
-
-cox.bl <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond , x=TRUE, y=TRUE, surv = TRUE, time.inc = 2*12, data = PACE_MRI)
+cox.bl <- cph(S ~ time.to.pace + gaf + pre.cond , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 # Get bootstrapped model
 bl.conf <- bootcov(cox.bl, B=1000, pr=TRUE)
 LR.orig <- cox.bl$stats['Model L.R.']
 cox.res <- cox_model(cox.bl, 1, cox.table, overfit.table)
 
-bl.multi <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond  + tc + cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_MRI)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond  + caarms.tc, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 cox.res <- cox_model(bl.multi, 2, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-bl.multi <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond + surface_lh_harm + surface_rh_harm , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_MRI)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond  + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 cox.res <- cox_model(bl.multi, 3, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-bl.multi <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond + curvature_lh_harm + curvature_rh_harm , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_MRI)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.surf , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 cox.res <- cox_model(bl.multi, 4, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-bl.multi <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond + volume_lh_harm + volume_rh_harm , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_MRI)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.curve , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 cox.res <- cox_model(bl.multi, 5, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-bl.multi <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond + thickness_lh_harm + thickness_rh_harm , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_MRI)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.vol , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 cox.res <- cox_model(bl.multi, 6, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-bl.multi <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond + corrected_gap + age_bl , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_MRI)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.thick , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 cox.res <- cox_model(bl.multi, 7, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + para_left , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 8, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + para_right , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 9, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + superior_right , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 10, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + fusi_left , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 11, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
 
 cox.table <- cox.res[[1]]
 overfit.table <- cox.res[[2]]
@@ -862,9 +906,9 @@ overfit.table <- cox.res[[2]]
 cox.table <- round(cox.table, digits = 3)
 overfit.table <- round(overfit.table, digits = 3)
 
-row.names(overfit.table) <- c('Clinical','Clinical + Caarms','Clinical + MRI surface','Clinical + MRI curve', 'Clinical + MRI volume', 'Clinical + MRI thickness', 'Clinical + brain age')
+row.names(overfit.table) <- c('Clinical','Clinical + UTC', 'Clinical + DC','Clinical + MRI surface','Clinical + MRI curve', 'Clinical + MRI volume', 'Clinical + MRI thickness', 'Clinical + Left Paracentral', 'Clinical + Right Paracentral',  'Clinical + Right Superiortemporal', 'Clinical + Left fusiform')
 
-row.names(cox.table) <- c('Clinical','Clinical + Caarms','Clinical + MRI surface','Clinical + MRI curve', 'Clinical + MRI volume', 'Clinical + MRI thickness', 'Clinical + brain age')
+row.names(cox.table) <-  c('Clinical','Clinical + UTC', 'Clinical + DC','Clinical + MRI surface','Clinical + MRI curve', 'Clinical + MRI volume', 'Clinical + MRI thickness', 'Clinical + Left Paracentral', 'Clinical + Right Paracentral',  'Clinical + Right Superiortemporal', 'Clinical + Left fusiform')
 
 colnames(cox.table) <- c('HR timepace', 'P timepace', 'HR gaf','P gaf', 'HR UHR','P UHR', 'HR2 UHR', 'P UHR', 'HR 4', 'P 4', 'HR 5', 'P 5', 'LR', 'LR P', 'Fraction of new information', 'C index')
 
@@ -880,25 +924,272 @@ cox.table %>%
   kable_classic(full_width = F, html_font = "Cambria")
 ```
 
+```{r, echo=FALSE}
+set.seed(12)
+# Create empty data frames for regression results table
+cox.table <- data.frame(hr1=double(),
+                  p1=double(),
+                  hr2=double(),
+                 p2=double(),
+                 hr3=double(),
+                 p3=double(),
+                 hr4=double(),
+                 p4=double(),
+                 hr5=double(),
+                 p5=double(),
+                 hr6=double(),
+                 p6=double(),
+                 LR_chisq=double(),
+                 p = double(),
+                 Fraction=double(),
+                 cIndex=double()) 
+
+# Create empty data frames for overfitting results table
+overfit.table <- data.frame(delta_Dxy=double(),
+                 delta_R2=double(), 
+                 delta_slope=double())
+
+cox.bl <- cph(S ~ time.to.pace + gaf + pre.cond , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+# Get bootstrapped model
+bl.conf <- bootcov(cox.bl, B=1000, pr=TRUE)
+LR.orig <- cox.bl$stats['Model L.R.']
+cox.res <- cox_model(cox.bl, 1, cox.table, overfit.table)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond  + caarms.tc, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 2, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + brain_age + age , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 3, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + age , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 4, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + brain_age , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 5, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+
+cox.table <- cox.res[[1]]
+overfit.table <- cox.res[[2]]
+
+```
+
+```{r, echo=FALSE}
+cox.table <- round(cox.table, digits = 3)
+overfit.table <- round(overfit.table, digits = 3)
+
+row.names(overfit.table) <- c('Clinical','Clinical + UTC','Clinical + Brain Age + Age','Clinical + Age', 'Clinical + Brain Age')
+
+row.names(cox.table) <- c('Clinical','Clinical + UTC','Clinical + Brain Age + Age','Clinical + Age', 'Clinical + Brain Age')
+
+colnames(cox.table) <- c('HR timepace', 'P timepace', 'HR gaf','P gaf', 'HR UHR','P UHR', 'HR2 UHR', 'P UHR', 'HR 4', 'P 4', 'HR 5', 'P 5', 'LR', 'LR P', 'Fraction of new information', 'C index')
+
+colnames(overfit.table) <- c('Optimism Dxy','Optimism R2','Optimism Slope')
+```
+
+
+Table lists the Cox model fit measures (Somer's D~xy, R)
+
+```{r, echo=FALSE,  fig.height = 8, fig.width = 8, fig.align = "center"}
+cox.table %>%
+  kbl(caption = "Table 2: Comparison of model fit measures between nested models using Caarms or Brain Age Gap") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+```{r, echo=FALSE}
+set.seed(12)
+# Create empty data frames for regression results table
+cox.table <- data.frame(hr1=double(),
+                  p1=double(),
+                  hr2=double(),
+                 p2=double(),
+                 hr3=double(),
+                 p3=double(),
+                 hr4=double(),
+                 p4=double(),
+                 hr5=double(),
+                 p5=double(),
+                 hr6=double(),
+                 p6=double(),
+                 LR_chisq=double(),
+                 p = double(),
+                 Fraction=double(),
+                 cIndex=double()) 
+
+# Create empty data frames for overfitting results table
+overfit.table <- data.frame(delta_Dxy=double(),
+                 delta_R2=double(), 
+                 delta_slope=double())
+
+cox.bl <- cph(S ~ time.to.pace + gaf + pre.cond , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+# Get bootstrapped model
+bl.conf <- bootcov(cox.bl, B=1000, pr=TRUE)
+LR.orig <- cox.bl$stats['Model L.R.']
+cox.res <- cox_model(cox.bl, 1, cox.table, overfit.table)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond  + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 2, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.vol + pc1.thick , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 3, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + pc1.thick + pc2.thick , x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 4, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + para_left  +  para_right, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 5, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + para_left  +  fusi_left, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 6, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+
+cox.table <- cox.res[[1]]
+overfit.table <- cox.res[[2]]
+
+```
+
+```{r, echo=FALSE}
+cox.table <- round(cox.table, digits = 3)
+overfit.table <- round(overfit.table, digits = 3)
+
+row.names(overfit.table) <- c('Clinical','Clinical + UTC','Clinical + Volume + Thickness','Clinical + Thickness','Clinical + Para left and right', 'Clinical + para + fusiform')
+
+row.names(cox.table) <- c('Clinical','Clinical + UTC','Clinical + Volume + Thickness','Clinical + Thickness','Clinical + Para left and right', 'Clinical + para + fusiform')
+
+colnames(cox.table) <- c('HR timepace', 'P timepace', 'HR gaf','P gaf', 'HR UHR','P UHR', 'HR2 UHR', 'P UHR', 'HR 4', 'P 4', 'HR 5', 'P 5', 'LR', 'LR P', 'Fraction of new information', 'C index')
+
+colnames(overfit.table) <- c('Optimism Dxy','Optimism R2','Optimism Slope')
+```
+
+
+Table lists the Cox model fit measures (Somer's D~xy, R)
+
+```{r, echo=FALSE,  fig.height = 8, fig.width = 8, fig.align = "center"}
+cox.table %>%
+  kbl(caption = "Table 2: Comparison of model fit measures between nested models using Caarms or Brain Age Gap") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
 ## Calibration
 
 ```{r, echo=FALSE,  fig.height = 7, fig.width = 7, fig.align = "center"}
 
-year2_plot <- calibration_plot(Surv(PACE_MRI$transmonths, PACE_MRI$transtat), PACE_MRI$timepace, PACE_MRI$gaf, PACE_MRI$cd, PACE_MRI$tc, PACE_MRI$pre.cond, PACE_MRI$corrected_gap, PACE_MRI$age_bl, 2)
-#year5_plot <- calibration_plot(timepace, gaf, caarms.cd, caarms.tc, pre.cond, pc1.thick, pc2.thick, 2)
-#year10_plot <- calibration_plot(timepace, gaf, caarms.cd, caarms.tc, pre.cond, pc1.thick, pc2.thick, 2)
+year2_plot <- calibration_plot(S, time.to.pace, gaf, caarms.cd, caarms.tc, pre.cond, para_left, fusi_left, 2)
 
 year2_plot
-#year5_plot
-#year10_plot
 
-
-cal_plot <- calibration_plot_all(Surv(PACE_MRI$transmonths, PACE_MRI$transtat), PACE_MRI$timepace, PACE_MRI$gaf, PACE_MRI$corrected_gap, PACE_MRI$age_bl, PACE_MRI$pre.cond)
-
-cal_plot
 ```
 
+
 Cox Model using clinical variables and neurocognition variables
+
+```{r, echo=FALSE}
+
+dtime <- PACE_neurocog$transmonths
+event <- PACE_neurocog$transtat
+
+rm(time.to.pace, gaf, ttmt, pre.cond, caarms.tc, caarms.cd)
+
+# Preperation for imputation
+w <- transcan(~ timepace + gaf +  ttmt + pre.cond + tc + cd + Ax1CodingASS + Ax1ArithASS + Ax1RAVLT_tot3, imputed=TRUE, data = PACE_neurocog, pl=FALSE, pr = FALSE)
+
+# create variables out of columns
+attach(PACE_neurocog)
+
+# Imputation
+time.to.pace <- log(impute(w, timepace, data = PACE_neurocog))
+gaf <- impute(w, gaf, data = PACE_neurocog)
+ttmt <- impute(w, ttmt, data = PACE_neurocog)
+pre.cond <- impute(w, pre.cond, data = PACE_neurocog)
+cog1 <- impute(w, Ax1CodingASS, data = PACE_neurocog)
+cog2 <- impute(w, Ax1ArithASS, data = PACE_neurocog)
+cog3 <- impute(w, Ax1RAVLT_tot3, data = PACE_neurocog)
+caarms.tc <- impute(w, tc, data = PACE_neurocog)
+caarms.cd <- impute(w, cd, data = PACE_neurocog)
+
+pre.cond <- relevel(factor(pre.cond),ref=3)
+# Preperation for cox model fit
+dd <- datadist(time.to.pace, gaf, ttmt, pre.cond, cog1, cog2, cog3, caarms.cd, caarms.tc)
+options(datadist='dd')
+units(dtime) <- 'Month'
+
+# Define Surv model
+S <- Surv(dtime, event)
+
+
+# Create empty data frames for regression results table
+cox.table <- data.frame(hr1=double(),
+                  p1=double(),
+                  hr2=double(),
+                 p2=double(),
+                 hr3=double(),
+                 p3=double(),
+                 hr4=double(),
+                 p4=double(),
+                 hr5=double(),
+                 p5=double(),
+                 hr6=double(),
+                 p6=double(),
+                 LR_chisq=double(),
+                 p = double(),
+                 Fraction=double(),
+                 cIndex=double()) 
+
+# Create empty data frames for overfitting results table
+overfit.table <- data.frame(delta_Dxy=double(),
+                 delta_R2=double(), 
+                 delta_slope=double())
+
+set.seed(12)
+
+cox.bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+# Get bootstrapped model
+bl.conf <- bootcov(cox.bl, B=1000, pr=TRUE)
+LR.orig <- cox.bl$stats['Model L.R.']
+cox.res <- cox_model(cox.bl, 1, cox.table, overfit.table)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 2, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 3, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + cog1, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 4, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + cog2, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 5, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + cog3, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 6, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+cox.table <- cox.res[[1]]
+overfit.table <- cox.res[[2]]
+
+```
+
+
+```{r, echo=FALSE}
+cox.table <- round(cox.table, digits = 3)
+overfit.table <- round(overfit.table, digits = 3)
+
+row.names(overfit.table) <- c('Clinical','Clinical + thought content', 'Clinical + disorganised','Clinical + Coding', 'Clinical + Arithmetic', 'Clinical + RAVLT')
+
+row.names(cox.table) <- c('Clinical','Clinical + thought content', 'Clinical + disorganised','Clinical + Coding', 'Clinical + Arithmetic', 'Clinical + RAVLT')
+
+colnames(cox.table) <- c('HR timepace', 'P timepace', 'HR gaf','P gaf', 'HR UHR','P UHR', 'HR2 UHR', 'P UHR', 'HR 4', 'P 4', 'HR 5', 'P 5', 'LR', 'LR P', 'Fraction of new information', 'C index')
+
+colnames(overfit.table) <- c('Optimism Dxy','Optimism R2','Optimism Slope')
+```
+
+
+Table lists the Cox model fit measures (Somer's D~xy, R)
+
+```{r, echo=FALSE,  fig.height = 8, fig.width = 8, fig.align = "center"}
+cox.table %>%
+  kbl(caption = "Table 2: Comparison of model fit measures between nested models using Caarms, and cognition") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
 
 ```{r, echo=FALSE}
 
@@ -927,36 +1218,36 @@ overfit.table <- data.frame(delta_Dxy=double(),
 
 set.seed(12)
 
-PACE_neurocog$pre.cond <- relevel(as.factor(PACE_neurocog$pre.cond),ref = 1)
-
-dd <- datadist(PACE_neurocog)
-options(datadist='dd')
-
-cox.bl <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_neurocog)
+cox.bl <- cph(S ~ time.to.pace + gaf + pre.cond, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 # Get bootstrapped model
 bl.conf <- bootcov(cox.bl, B=1000, pr=TRUE)
 LR.orig <- cox.bl$stats['Model L.R.']
 cox.res <- cox_model(cox.bl, 1, cox.table, overfit.table)
 
-bl.multi <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond + tc + cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_neurocog)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + caarms.tc + caarms.cd, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 cox.res <- cox_model(bl.multi, 2, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
-bl.multi <- cph(Surv(transmonths, transtat) ~ timepace + gaf + pre.cond + Ax1CodingASS + Ax1ArithASS, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12, data = PACE_neurocog)
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + cog1 + cog2, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
 cox.res <- cox_model(bl.multi, 3, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + cog2 + cog3, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 4, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
+
+bl.multi <- cph(S ~ time.to.pace + gaf + pre.cond + cog3 + cog1, x=TRUE, y=TRUE, surv = TRUE, time.inc = 10*12)
+cox.res <- cox_model(bl.multi, 5, cox.res[[1]], cox.res[[2]], bl.conf, LR.orig)
 
 cox.table <- cox.res[[1]]
 overfit.table <- cox.res[[2]]
 
 ```
 
-
 ```{r, echo=FALSE}
 cox.table <- round(cox.table, digits = 3)
 overfit.table <- round(overfit.table, digits = 3)
 
-row.names(overfit.table) <- c('Clinical','Clinical + Caarms','Clinical + Neurocognition')
+row.names(overfit.table) <- c('Clinical','Clinical + Caarms','Clinical + Coding/Arithmetic', 'Clinical + Arithmetic/RAVLT', 'Clinical + RAVLT/Coding')
 
-row.names(cox.table) <- c('Clinical','Clinical + Caarms','Clinical + Neurocognition')
+row.names(cox.table) <- c('Clinical','Clinical + Caarms','Clinical + Coding/Arithmetic', 'Clinical + Arithmetic/RAVLT', 'Clinical + RAVLT/Coding')
 
 colnames(cox.table) <- c('HR timepace', 'P timepace', 'HR gaf','P gaf', 'HR UHR','P UHR', 'HR2 UHR', 'P UHR', 'HR 4', 'P 4', 'HR 5', 'P 5', 'LR', 'LR P', 'Fraction of new information', 'C index')
 
@@ -968,16 +1259,16 @@ Table lists the Cox model fit measures (Somer's D~xy, R)
 
 ```{r, echo=FALSE,  fig.height = 8, fig.width = 8, fig.align = "center"}
 cox.table %>%
-  kbl(caption = "Table 2: Comparison of model fit measures between nested models using Caarms, cognition, and structural imaging data") %>%
+  kbl(caption = "Table 2: Comparison of model fit measures between nested models using Caarms and cognition") %>%
   kable_classic(full_width = F, html_font = "Cambria")
 ```
+
 
 ## Calibration
 
 ```{r, echo=FALSE,  fig.height = 7, fig.width = 7, fig.align = "center"}
 
-year2_plot <- calibration_plot(Surv(PACE_neurocog$transmonths, PACE_neurocog$transtat), PACE_neurocog$timepace, PACE_neurocog$gaf, PACE_neurocog$cd, PACE_neurocog$tc, PACE_neurocog$pre.cond, PACE_neurocog$Ax1CodingASS, PACE_neurocog$Ax1ArithASS, 2)
-
+year2_plot <- calibration_plot(S, time.to.pace, gaf, caarms.cd, caarms.tc, pre.cond, cog1, cog2, 2)
 
 year2_plot
 
